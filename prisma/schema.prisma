@@ -1,13 +1,15 @@
-// Prisma + SQLite: lưu tiến độ ngay trên máy, không cần server DB.
-// DB file: prisma/dev.db
+// Prisma + Supabase (Postgres). DATABASE_URL = connection pooling (port 6543,
+// dùng lúc runtime/serverless); DIRECT_URL = kết nối trực tiếp (port 5432,
+// chỉ dùng khi chạy migrate).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // Hồ sơ người học (app cá nhân 1 người → chỉ 1 dòng, id = 1).
