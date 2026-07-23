@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 // Trả về các thẻ từ đã đến hạn ôn (dueDate <= hiện tại), tối đa 20 thẻ/lượt
 // để buổi ôn không quá dài. Kèm tổng số thẻ trong bộ để hiển thị thống kê.
