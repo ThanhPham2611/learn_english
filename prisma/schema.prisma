@@ -1,0 +1,60 @@
+// Prisma + SQLite: lưu tiến độ ngay trên máy, không cần server DB.
+// DB file: prisma/dev.db
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Hồ sơ người học (app cá nhân 1 người → chỉ 1 dòng, id = 1).
+// Lưu trình độ CEFR tổng và theo từng kỹ năng để Dashboard vẽ tiến độ.
+model Profile {
+  id            Int       @id @default(1)
+  overallLevel  String    @default("A2")
+  listening     String?
+  reading       String?
+  writing       String?
+  speaking      String?
+  placementDone Boolean   @default(false)
+  streak        Int       @default(0)
+  dailyGoal     Int       @default(3) // số "hoạt động luyện tập" muốn hoàn thành mỗi ngày
+  lastStudyDate DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// Mỗi lần luyện tập / test = 1 Attempt. Nguồn dữ liệu cho mọi biểu đồ tiến độ.
+// detail chứa JSON bằng chứng (lỗi cụ thể, chỉ số) do Assessor sinh ra.
+model Attempt {
+  id        Int      @id @default(autoincrement())
+  skill     String // placement | chat | writing | speaking | reading | listening
+  cefr      String // A1..C2
+  score     Float // 1..6 (A1=1 ... C2=6)
+  detail    String? // JSON: rationale, errors, metrics
+  createdAt DateTime @default(now())
+
+  @@index([skill, createdAt])
+}
+
+// Thẻ từ vựng ôn theo thuật toán lặp lại ngắt quãng SM-2 (kiểu Anki).
+// Được thêm tự động từ các bài Đọc; ôn ở màn "Ôn từ vựng".
+model VocabCard {
+  id           Int      @id @default(autoincrement())
+  word         String   @unique
+  meaning      String
+  example      String?
+  level        String // cấp CEFR của từ khi được thêm vào
+  sourceSkill  String // "reading" (mở rộng nguồn khác sau này nếu cần)
+  repetition   Int      @default(0) // số lần ôn đúng liên tiếp (SM-2)
+  easeFactor   Float    @default(2.5) // hệ số dễ/khó (SM-2)
+  intervalDays Int      @default(0)
+  dueDate      DateTime @default(now()) // đến hạn ôn lại
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([dueDate])
+}
