@@ -23,6 +23,8 @@ const config: Config = {
         userbubble: "var(--user-bubble)",
         "primary-text": "var(--primary-text)",
         "accent-text": "var(--accent-text)",
+        danger: "var(--danger)",
+        "danger-text": "var(--danger-text)",
       },
       fontFamily: {
         heading: ["var(--font-heading)", "Georgia", "serif"],

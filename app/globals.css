@@ -16,6 +16,8 @@
   /* Biến thể đậm hơn CHUYÊN DÙNG CHO CHỮ trên nền sáng (đạt AA 4.5:1) — primary/accent gốc chỉ đủ ~3.6-3.7:1 nên không dùng cho text thường. */
   --primary-text: #0f766e;
   --accent-text: #c2410c;
+  --danger: #dc2626;
+  --danger-text: #b91c1c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -31,6 +33,8 @@
     --user-bubble: #0f766e; /* giữ teal đậm để chữ trắng vẫn đủ contrast trong dark mode */
     --primary-text: #5eead4; /* teal sáng hơn — đủ contrast trên nền tối */
     --accent-text: #fdba74;
+    --danger: #f87171;
+    --danger-text: #fca5a5;
   }
 }
 
@@ -59,6 +63,37 @@
     opacity: 1;
     transform: translateY(-3px);
   }
+}
+
+/* Bóng đổ 2 lớp mềm cho thẻ/card — bổ sung chiều sâu thay vì chỉ dựa vào viền. */
+.shadow-card {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  .shadow-card {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24), 0 4px 16px rgba(0, 0, 0, 0.32);
+  }
+}
+.shadow-card-hover {
+  transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+.shadow-card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.06), 0 8px 20px rgba(15, 23, 42, 0.10);
+}
+@media (prefers-color-scheme: dark) {
+  .shadow-card-hover:hover {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* Hiệu ứng xuất hiện nhẹ cho tiêu đề trang / popover — tôn trọng prefers-reduced-motion bên dưới. */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fade-in-up 0.35s ease-out both;
 }
 
 body {

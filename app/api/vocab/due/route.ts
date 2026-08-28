@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,9 @@ export const dynamic = "force-dynamic";
 // Query param "mode=ahead": khi không còn thẻ nào đến hạn nhưng người học vẫn muốn
 // ôn thêm, lấy các thẻ CHƯA đến hạn, ưu tiên thẻ gần đến hạn nhất (ôn trước lịch).
 export async function GET(req: Request) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   try {
     const { searchParams } = new URL(req.url);
     const excludeIds = (searchParams.get("exclude") ?? "")
@@ -21,6 +25,7 @@ export async function GET(req: Request) {
 
     const now = new Date();
     const where = {
+      userId,
       ...(ahead ? {} : { dueDate: { lte: now } }),
       ...(excludeIds.length > 0 ? { id: { notIn: excludeIds } } : {}),
     };
@@ -34,7 +39,7 @@ export async function GET(req: Request) {
         // lộ ra qua response của POST /api/vocab/check (xem route đó).
         select: { id: true, word: true, level: true, repetition: true, intervalDays: true },
       }),
-      prisma.vocabCard.count(),
+      prisma.vocabCard.count({ where: { userId } }),
       prisma.vocabCard.count({ where }),
     ]);
     // Số thẻ còn lại (cùng điều kiện where) sau khi đã lấy lô này — cho biết còn

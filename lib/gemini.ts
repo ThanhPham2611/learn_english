@@ -8,6 +8,11 @@ const apiKey = process.env.GEMINI_API_KEY;
 // Tên model đọc từ .env.local để đổi model mà không cần sửa code.
 export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// Model nhẹ hơn dùng cho các lượt dịch từ đơn giản (không nhập nhằng nghĩa) —
+// tách riêng model để có thêm 1 quota/ngày riêng bên cạnh GEMINI_MODEL (free
+// tier Gemini giới hạn request/ngày THEO TỪNG MODEL), không chỉ để tiết kiệm.
+export const GEMINI_MODEL_LITE = process.env.GEMINI_MODEL_LITE || "gemini-flash-lite-latest";
+
 // Báo lỗi rõ ràng nếu quên điền key — đỡ mất thời gian dò.
 export function assertApiKey(): string {
   if (!apiKey || apiKey === "your_key_here") {

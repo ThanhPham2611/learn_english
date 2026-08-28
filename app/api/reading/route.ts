@@ -8,15 +8,20 @@ import {
   readingScoreToLevel,
 } from "@/lib/reading-content";
 import { getProfile, recordStudyActivity } from "@/lib/profile-db";
+import { awardPoints, POINTS_PER_ACTIVITY } from "@/lib/points";
 import { prisma } from "@/lib/db";
 import { CEFR_LEVELS, CefrLevel, cefrToNumber } from "@/lib/cefr";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 // GET: trả 1 bài đọc khớp trình độ hiện tại + từ mới (vocab) + câu hỏi (đã bỏ đáp án).
 export async function GET() {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   try {
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const level = (profile.reading ?? profile.overallLevel) as CefrLevel;
     const passage = randomPassageForLevel(CEFR_LEVELS.includes(level) ? level : "A2");
     return Response.json({ passage: passageForClient(passage), level });
@@ -29,6 +34,9 @@ export async function GET() {
 // POST: chấm câu hỏi hiểu (deterministic) -> lưu Attempt -> thêm từ mới của bài
 // vào bộ ôn tập SRS (bỏ qua từ đã có sẵn, không ghi đè tiến độ ôn đang có).
 export async function POST(req: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   let passageId: number;
   let answers: Record<number, number>;
   try {
@@ -70,6 +78,7 @@ export async function POST(req: NextRequest) {
     const newVocabAdded = await prisma.$transaction(async (tx) => {
       await tx.attempt.create({
         data: {
+          userId,
           skill: "reading",
           cefr: cefrLevel,
           score: cefrToNumber(cefrLevel),
@@ -77,18 +86,21 @@ export async function POST(req: NextRequest) {
         },
       });
       await tx.profile.upsert({
-        where: { id: 1 },
+        where: { userId },
         update: { reading: cefrLevel },
-        create: { id: 1, overallLevel: "A2", reading: cefrLevel },
+        create: { userId, overallLevel: "A2", reading: cefrLevel },
       });
 
       let added = 0;
       for (const v of passage.vocab) {
-        const before = await tx.vocabCard.findUnique({ where: { word: v.word } });
+        const before = await tx.vocabCard.findUnique({
+          where: { userId_word: { userId, word: v.word } },
+        });
         await tx.vocabCard.upsert({
-          where: { word: v.word },
+          where: { userId_word: { userId, word: v.word } },
           update: {}, // giữ nguyên tiến độ ôn nếu từ đã tồn tại
           create: {
+            userId,
             word: v.word,
             meaning: v.meaning,
             example: v.example,
@@ -101,10 +113,11 @@ export async function POST(req: NextRequest) {
       return added;
     });
     try {
-      await recordStudyActivity();
+      await recordStudyActivity(userId);
+      await awardPoints(userId, POINTS_PER_ACTIVITY.reading);
     } catch (err) {
-      // Không để lỗi cập nhật streak (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
-      console.error("[streak] lỗi khi cập nhật (không nghiêm trọng):", err);
+      // Không để lỗi cập nhật streak/điểm (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
+      console.error("[streak/points] lỗi khi cập nhật (không nghiêm trọng):", err);
     }
 
     return Response.json({

@@ -36,11 +36,11 @@ export interface VocabStats {
   due: number;
 }
 
-export async function getVocabStats(): Promise<VocabStats> {
+export async function getVocabStats(userId: string): Promise<VocabStats> {
   const [total, mastered, due] = await Promise.all([
-    prisma.vocabCard.count(),
-    prisma.vocabCard.count({ where: { repetition: { gte: 2 } } }),
-    prisma.vocabCard.count({ where: { dueDate: { lte: new Date() } } }),
+    prisma.vocabCard.count({ where: { userId } }),
+    prisma.vocabCard.count({ where: { userId, repetition: { gte: 2 } } }),
+    prisma.vocabCard.count({ where: { userId, dueDate: { lte: new Date() } } }),
   ]);
   return { total, mastered, due };
 }
@@ -53,11 +53,11 @@ export interface TodayProgress {
 // "Hoạt động hôm nay" = số Attempt (Viết/Nói/Đọc/Nghe/Test đầu vào) tạo hôm nay +
 // số thẻ từ vựng được ôn ít nhất 1 lần hôm nay (xấp xỉ qua updatedAt — không đếm
 // trùng nếu ôn 1 thẻ 2 lần, đủ tốt cho app cá nhân, khỏi cần thêm bảng event-log).
-export async function getTodayProgress(dailyGoal: number): Promise<TodayProgress> {
+export async function getTodayProgress(userId: string, dailyGoal: number): Promise<TodayProgress> {
   const today = startOfDay(new Date());
   const [attemptsToday, vocabReviewedToday] = await Promise.all([
-    prisma.attempt.count({ where: { createdAt: { gte: today } } }),
-    prisma.vocabCard.count({ where: { updatedAt: { gte: today } } }),
+    prisma.attempt.count({ where: { userId, createdAt: { gte: today } } }),
+    prisma.vocabCard.count({ where: { userId, updatedAt: { gte: today } } }),
   ]);
   return { done: attemptsToday + vocabReviewedToday, goal: dailyGoal };
 }
@@ -79,9 +79,10 @@ const DIFFICULT_EASE_THRESHOLD = 2.3;
 
 // Từ khó (dễ quên, easeFactor thấp) hoặc chưa từng ôn đúng lần nào (repetition = 0).
 // Sắp theo easeFactor tăng dần — khó nhất lên đầu.
-export async function getDifficultWords(limit = 100): Promise<DifficultWord[]> {
+export async function getDifficultWords(userId: string, limit = 100): Promise<DifficultWord[]> {
   return prisma.vocabCard.findMany({
     where: {
+      userId,
       OR: [{ easeFactor: { lt: DIFFICULT_EASE_THRESHOLD } }, { repetition: 0 }],
     },
     orderBy: [{ easeFactor: "asc" }, { repetition: "asc" }],
@@ -106,13 +107,14 @@ export interface AttemptPoint {
 }
 
 // Tổng số lượt luyện tập (mọi kỹ năng, mọi thời điểm) — dùng cho cột mốc thành tích.
-export async function getAttemptCount(): Promise<number> {
-  return prisma.attempt.count();
+export async function getAttemptCount(userId: string): Promise<number> {
+  return prisma.attempt.count({ where: { userId } });
 }
 
 // Lấy các lượt luyện gần đây để vẽ xu hướng theo thời gian (mỗi kỹ năng 1 đường).
-export async function getAttemptTrend(limit = 100): Promise<AttemptPoint[]> {
+export async function getAttemptTrend(userId: string, limit = 100): Promise<AttemptPoint[]> {
   const attempts = await prisma.attempt.findMany({
+    where: { userId },
     orderBy: { createdAt: "asc" },
     take: limit,
     select: { skill: true, cefr: true, score: true, createdAt: true },
@@ -165,12 +167,22 @@ function summarizeEvidence(skill: string, detailRaw: string | null): string {
     return typeof d.rationale === "string" ? d.rationale : "Không có chi tiết.";
   }
 
+  if (skill === "dictation") {
+    const correct = d.correctWords;
+    const total = d.totalWords;
+    const pct = d.accuracyPct;
+    return typeof correct === "number" && typeof total === "number"
+      ? `${correct}/${total} từ đúng (${pct}% chính xác)`
+      : "Không có chi tiết.";
+  }
+
   return "Không có chi tiết.";
 }
 
 // Danh sách bằng chứng thô gần nhất — để người dùng tự soát lại, không chỉ tin số liệu tổng hợp.
-export async function getRecentAttempts(limit = 10): Promise<RecentAttempt[]> {
+export async function getRecentAttempts(userId: string, limit = 10): Promise<RecentAttempt[]> {
   const attempts = await prisma.attempt.findMany({
+    where: { userId },
     orderBy: { createdAt: "desc" },
     take: limit,
     select: { id: true, skill: true, cefr: true, score: true, createdAt: true, detail: true },

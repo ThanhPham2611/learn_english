@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { checkVocabAnswer } from "@/lib/agents/vocab-checker";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -8,6 +9,9 @@ export const runtime = "nodejs";
 // lại VocabCard.meaning theo cardId từ DB, vì /due không còn gửi meaning/example
 // trước bước tự kiểm tra này (xem app/api/vocab/due/route.ts).
 export async function POST(req: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   let cardId: number;
   let userAnswer: string;
   try {
@@ -21,7 +25,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Dữ liệu gửi lên không hợp lệ" }, { status: 400 });
   }
 
-  const card = await prisma.vocabCard.findUnique({ where: { id: cardId } });
+  const card = await prisma.vocabCard.findUnique({ where: { id: cardId, userId } });
   if (!card) {
     return Response.json({ error: "Không tìm thấy thẻ" }, { status: 400 });
   }

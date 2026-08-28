@@ -1,6 +1,7 @@
 import { getGemini, GEMINI_MODEL } from "@/lib/gemini";
 import { CefrLevel, CEFR_LEVELS, cefrToNumber } from "@/lib/cefr";
 import { FILLER_WORDS } from "@/lib/fluency";
+import { MISTAKE_CATEGORIES, coerceMistakeCategory } from "@/lib/mistake-categories";
 
 // AGENT "ASSESSOR" — người chấm, ĐỘC LẬP với Tutor.
 // Nhiệm vụ: chấm output của người học theo thang CEFR và trả về JSON có cấu trúc
@@ -105,6 +106,7 @@ export interface WritingError {
   original: string; // cụm từ/câu gốc có lỗi
   correction: string; // sửa lại đúng
   explanation: string; // giải thích ngắn gọn tại sao sai
+  category: string; // 1 giá trị trong MISTAKE_CATEGORIES — dùng cho tính năng "Điểm yếu"
 }
 
 export interface WritingAssessment {
@@ -143,7 +145,7 @@ Return JSON with EXACTLY these keys:
   "cefrLevel": one of ["A1","A2","B1","B2","C1","C2"] (the level this essay actually demonstrates),
   "taskAchievement": short English sentence on whether the essay fulfills the task,
   "grammarVocab": short English sentence on grammar/vocabulary range and accuracy,
-  "errors": array (max 6) of { "original": exact substring copied verbatim from the essay, "correction": corrected version, "explanation": short reason },
+  "errors": array (max 6) of { "original": exact substring copied verbatim from the essay, "correction": corrected version, "explanation": short reason, "category": one of [${MISTAKE_CATEGORIES.map((c) => `"${c}"`).join(", ")}] (the closest matching mistake type) },
   "strengths": array of 1-3 short strings,
   "weaknesses": array of 1-3 short strings
 }
@@ -157,6 +159,7 @@ If there are no errors, return an empty array for "errors".`
       original: typeof e.original === "string" ? e.original : "",
       correction: typeof e.correction === "string" ? e.correction : "",
       explanation: typeof e.explanation === "string" ? e.explanation : "",
+      category: coerceMistakeCategory(e.category),
     }))
     // Chỉ giữ lỗi mà cụm gốc thực sự có trong bài (tránh AI bịa trích dẫn) để highlight chính xác.
     .filter((e) => e.original && essay.includes(e.original))
@@ -219,7 +222,7 @@ Return JSON with EXACTLY these keys:
   "cefrLevel": one of ["A1","A2","B1","B2","C1","C2"] (the level this response actually demonstrates),
   "taskAchievement": short English sentence on whether the response addresses the task,
   "grammarVocab": short English sentence on grammar/vocabulary range and accuracy,
-  "errors": array (max 6) of { "original": exact substring copied verbatim from the transcript, "correction": corrected version, "explanation": short reason },
+  "errors": array (max 6) of { "original": exact substring copied verbatim from the transcript, "correction": corrected version, "explanation": short reason, "category": one of [${MISTAKE_CATEGORIES.map((c) => `"${c}"`).join(", ")}] (the closest matching mistake type) },
   "strengths": array of 1-3 short strings,
   "weaknesses": array of 1-3 short strings
 }
@@ -233,6 +236,7 @@ If there are no grammar errors, return an empty array for "errors".`
       original: typeof e.original === "string" ? e.original : "",
       correction: typeof e.correction === "string" ? e.correction : "",
       explanation: typeof e.explanation === "string" ? e.explanation : "",
+      category: coerceMistakeCategory(e.category),
     }))
     .filter((e) => e.original && transcript.includes(e.original))
     .slice(0, 6);
@@ -272,7 +276,7 @@ Message: "${message}"
 
 Return JSON with EXACTLY this key:
 {
-  "errors": array (max 4) of { "original": exact substring copied verbatim from the message, "correction": corrected version, "explanation": very short reason (max ~12 words) }
+  "errors": array (max 4) of { "original": exact substring copied verbatim from the message, "correction": corrected version, "explanation": very short reason (max ~12 words), "category": one of [${MISTAKE_CATEGORIES.map((c) => `"${c}"`).join(", ")}] (the closest matching mistake type) }
 }
 If there are no errors, return an empty array.`
   );
@@ -284,6 +288,7 @@ If there are no errors, return an empty array.`
       original: typeof e.original === "string" ? e.original : "",
       correction: typeof e.correction === "string" ? e.correction : "",
       explanation: typeof e.explanation === "string" ? e.explanation : "",
+      category: coerceMistakeCategory(e.category),
     }))
     .filter((e) => e.original && message.includes(e.original))
     .slice(0, 4);

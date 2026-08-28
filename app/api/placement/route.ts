@@ -9,7 +9,9 @@ import {
 } from "@/lib/placement";
 import { assessPlacement, levelToScore } from "@/lib/agents/assessor";
 import { applyPlacement, recordStudyActivity } from "@/lib/profile-db";
+import { awardPoints, POINTS_PER_ACTIVITY } from "@/lib/points";
 import { prisma } from "@/lib/db";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -23,6 +25,9 @@ export async function GET() {
 
 // POST: nhận bài làm -> chấm trắc nghiệm -> Assessor ước lượng CEFR -> lưu DB.
 export async function POST(req: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   // --- 1) Đọc & kiểm tra request (lỗi ở bước này -> 400, lỗi của người gửi) ---
   let answers: Record<number, number>;
   let writingSample: string;
@@ -83,21 +88,23 @@ export async function POST(req: NextRequest) {
     // Lưu 1 Attempt (bằng chứng) + cập nhật hồ sơ.
     await prisma.attempt.create({
       data: {
+        userId,
         skill: "placement",
         cefr: assessment.overallLevel,
         score: levelToScore(assessment.overallLevel),
         detail: JSON.stringify({ mcqCorrect, mcqTotal, mcqLevel, questionResults, ...assessment }),
       },
     });
-    await applyPlacement({
+    await applyPlacement(userId, {
       overall: assessment.overallLevel,
       writing: assessment.writingLevel,
     });
     try {
-      await recordStudyActivity();
+      await recordStudyActivity(userId);
+      await awardPoints(userId, POINTS_PER_ACTIVITY.placement);
     } catch (err) {
-      // Không để lỗi cập nhật streak (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
-      console.error("[streak] lỗi khi cập nhật (không nghiêm trọng):", err);
+      // Không để lỗi cập nhật streak/điểm (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
+      console.error("[streak/points] lỗi khi cập nhật (không nghiêm trọng):", err);
     }
 
     return Response.json({

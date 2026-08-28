@@ -1,11 +1,14 @@
 import { NextRequest } from "next/server";
 import { translateMessage } from "@/lib/agents/translator";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 // POST: dịch nguyên 1 tin nhắn AI sang tiếng Việt. Đây là hành động người dùng
 // chủ động bấm và đang chờ kết quả -> báo lỗi thật (khác grammar-check chạy nền).
 export async function POST(req: NextRequest) {
+  if (!(await getCurrentUserId())) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   let text: string;
   try {
     const body = (await req.json()) as { text?: string };

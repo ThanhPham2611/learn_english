@@ -2,16 +2,21 @@ import { NextRequest } from "next/server";
 import { randomPromptForLevel, findPrompt } from "@/lib/speaking-prompts";
 import { assessSpeaking, levelToScore } from "@/lib/agents/assessor";
 import { getProfile, applySpeakingLevel, recordStudyActivity } from "@/lib/profile-db";
+import { awardPoints, POINTS_PER_ACTIVITY } from "@/lib/points";
 import { computeFluency } from "@/lib/fluency";
 import { prisma } from "@/lib/db";
 import { CEFR_LEVELS, CefrLevel } from "@/lib/cefr";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 // GET: trả 1 đề nói ngẫu nhiên khớp trình độ hiện tại (speaking level nếu có).
 export async function GET() {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   try {
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const level = (profile.speaking ?? profile.overallLevel) as CefrLevel;
     const prompt = randomPromptForLevel(CEFR_LEVELS.includes(level) ? level : "A2");
     return Response.json({ prompt, level });
@@ -30,6 +35,9 @@ export async function GET() {
 //   transcript là toàn bộ các lượt NÓI của người học nối lại, topic là câu hỏi mở đầu
 //   của AI (dùng làm promptInstruction cho Assessor thay vì 1 đề tĩnh).
 export async function POST(req: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   // --- 1) Đọc & kiểm tra request ---
   let promptTitle: string;
   let promptInstruction: string;
@@ -96,7 +104,7 @@ export async function POST(req: NextRequest) {
 
   // --- 2) Chấm + lưu DB ---
   try {
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const learnerLevel = (profile.speaking ?? profile.overallLevel) as CefrLevel;
 
     let assessment;
@@ -119,18 +127,34 @@ export async function POST(req: NextRequest) {
 
     await prisma.attempt.create({
       data: {
+        userId,
         skill: "speaking",
         cefr: assessment.cefrLevel,
         score: levelToScore(assessment.cefrLevel),
         detail: JSON.stringify({ transcript, ...metrics, ...assessment, ...attemptDetailExtra }),
       },
     });
-    await applySpeakingLevel(assessment.cefrLevel);
+    await applySpeakingLevel(userId, assessment.cefrLevel);
     try {
-      await recordStudyActivity();
+      await recordStudyActivity(userId);
+      await awardPoints(userId, POINTS_PER_ACTIVITY.speaking);
     } catch (err) {
-      // Không để lỗi cập nhật streak (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
-      console.error("[streak] lỗi khi cập nhật (không nghiêm trọng):", err);
+      // Không để lỗi cập nhật streak/điểm (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
+      console.error("[streak/points] lỗi khi cập nhật (không nghiêm trọng):", err);
+    }
+    if (assessment.errors.length > 0) {
+      prisma.mistakeRecord
+        .createMany({
+          data: assessment.errors.map((e) => ({
+            userId,
+            skill: "speaking",
+            category: e.category,
+            original: e.original,
+            correction: e.correction,
+            explanation: e.explanation,
+          })),
+        })
+        .catch((err) => console.error("[speaking] lỗi lưu MistakeRecord (không nghiêm trọng):", err));
     }
 
     return Response.json({ transcript, assessorUsed: true, ...metrics, ...assessment });

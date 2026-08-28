@@ -2,29 +2,32 @@ import { prisma } from "@/lib/db";
 import { CefrLevel } from "@/lib/cefr";
 import { startOfDay } from "@/lib/date";
 
-// Hồ sơ 1 người → luôn là dòng id = 1. Tạo mặc định nếu chưa có.
-export async function getProfile() {
+// Hồ sơ 1 dòng / user. Tạo mặc định nếu chưa có.
+export async function getProfile(userId: string) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: {},
-    create: { id: 1, overallLevel: "A2" },
+    create: { userId, overallLevel: "A2" },
   });
 }
 
 // Cập nhật trình độ sau khi làm bài test đầu vào.
-export async function applyPlacement(levels: {
-  overall: CefrLevel;
-  writing: CefrLevel;
-}) {
+export async function applyPlacement(
+  userId: string,
+  levels: {
+    overall: CefrLevel;
+    writing: CefrLevel;
+  }
+) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: {
       overallLevel: levels.overall,
       writing: levels.writing,
       placementDone: true,
     },
     create: {
-      id: 1,
+      userId,
       overallLevel: levels.overall,
       writing: levels.writing,
       placementDone: true,
@@ -34,52 +37,52 @@ export async function applyPlacement(levels: {
 
 // Cập nhật trình độ Viết sau mỗi bài luyện (không đổi overallLevel — đó là chỉ số
 // tổng, chỉ cập nhật lại khi làm test đầu vào hoặc ở Dashboard tổng hợp sau này).
-export async function applyWritingLevel(level: CefrLevel) {
+export async function applyWritingLevel(userId: string, level: CefrLevel) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: { writing: level },
-    create: { id: 1, overallLevel: "A2", writing: level },
+    create: { userId, overallLevel: "A2", writing: level },
   });
 }
 
-export async function applySpeakingLevel(level: CefrLevel) {
+export async function applySpeakingLevel(userId: string, level: CefrLevel) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: { speaking: level },
-    create: { id: 1, overallLevel: "A2", speaking: level },
+    create: { userId, overallLevel: "A2", speaking: level },
   });
 }
 
-export async function applyListeningLevel(level: CefrLevel) {
+export async function applyListeningLevel(userId: string, level: CefrLevel) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: { listening: level },
-    create: { id: 1, overallLevel: "A2", listening: level },
+    create: { userId, overallLevel: "A2", listening: level },
   });
 }
 
-export async function applyReadingLevel(level: CefrLevel) {
+export async function applyReadingLevel(userId: string, level: CefrLevel) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: { reading: level },
-    create: { id: 1, overallLevel: "A2", reading: level },
+    create: { userId, overallLevel: "A2", reading: level },
   });
 }
 
 // Cập nhật mục tiêu số hoạt động luyện tập muốn hoàn thành mỗi ngày.
-export async function setDailyGoal(dailyGoal: number) {
+export async function setDailyGoal(userId: string, dailyGoal: number) {
   return prisma.profile.upsert({
-    where: { id: 1 },
+    where: { userId },
     update: { dailyGoal },
-    create: { id: 1, overallLevel: "A2", dailyGoal },
+    create: { userId, overallLevel: "A2", dailyGoal },
   });
 }
 
 // Cập nhật streak (số ngày học liên tục). Gọi 1 lần sau mỗi lượt luyện tập
 // thành công (bất kỳ kỹ năng nào) — không gọi trong getProfile() để tránh
 // tăng streak chỉ vì mở trang xem, phải THẬT SỰ làm bài mới tính.
-export async function recordStudyActivity(now: Date = new Date()) {
-  const profile = await getProfile();
+export async function recordStudyActivity(userId: string, now: Date = new Date()) {
+  const profile = await getProfile(userId);
   const today = startOfDay(now);
 
   let streak = profile.streak;
@@ -98,7 +101,7 @@ export async function recordStudyActivity(now: Date = new Date()) {
   }
 
   return prisma.profile.update({
-    where: { id: 1 },
+    where: { userId },
     data: { streak, lastStudyDate: now },
   });
 }

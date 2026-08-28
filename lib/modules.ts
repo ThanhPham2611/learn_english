@@ -14,4 +14,5 @@ export const MODULES: ModuleInfo[] = [
   { slug: "speaking", title: "Nói", desc: "Nói vào mic, chấm độ trôi chảy.", ready: true },
   { slug: "reading", title: "Đọc", desc: "Bài đọc đúng cấp + câu hỏi hiểu.", ready: true },
   { slug: "listening", title: "Nghe", desc: "Nghe hội thoại + câu hỏi.", ready: true },
+  { slug: "dictation", title: "Nghe-Viết", desc: "Upload audio, nghe và gõ lại từng đoạn — chấm lỗi ký tự.", ready: true },
 ];

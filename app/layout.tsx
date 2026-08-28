@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Fraunces, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
-import { Nav } from "@/components/Nav";
 
 // Font đã chốt: Fraunces (tiêu đề, có cá tính) + IBM Plex Sans (nội dung, rất dễ đọc).
 const fraunces = Fraunces({
@@ -26,10 +25,7 @@ export default function RootLayout({
   return (
     <html lang="vi">
       <body className={`${fraunces.variable} ${plexSans.variable} antialiased`}>
-        <Nav />
-        <main className="mx-auto w-full max-w-5xl px-4 py-6 md:py-10">
-          {children}
-        </main>
+        {children}
       </body>
     </html>
   );

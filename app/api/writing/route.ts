@@ -2,16 +2,21 @@ import { NextRequest } from "next/server";
 import { randomPromptForLevel, findPrompt } from "@/lib/writing-prompts";
 import { assessWriting, levelToScore } from "@/lib/agents/assessor";
 import { getProfile, applyWritingLevel, recordStudyActivity } from "@/lib/profile-db";
+import { awardPoints, POINTS_PER_ACTIVITY } from "@/lib/points";
 import { prisma } from "@/lib/db";
 import { CEFR_LEVELS, CefrLevel } from "@/lib/cefr";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
 // GET: trả 1 đề viết ngẫu nhiên khớp trình độ hiện tại của người học (writing level
 // nếu đã có, không thì dùng overallLevel).
 export async function GET() {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   try {
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const level = (profile.writing ?? profile.overallLevel) as CefrLevel;
     const prompt = randomPromptForLevel(CEFR_LEVELS.includes(level) ? level : "A2");
     return Response.json({ prompt, level });
@@ -23,6 +28,9 @@ export async function GET() {
 
 // POST: nhận bài luận -> Assessor chấm rubric + lỗi inline -> lưu Attempt + cập nhật hồ sơ.
 export async function POST(req: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) return Response.json({ error: "Chưa đăng nhập" }, { status: 401 });
+
   // --- 1) Đọc & kiểm tra request ---
   let promptId: number;
   let essay: string;
@@ -60,7 +68,7 @@ export async function POST(req: NextRequest) {
 
   // --- 2) Chấm + lưu DB ---
   try {
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const learnerLevel = (profile.writing ?? profile.overallLevel) as CefrLevel;
 
     let assessorUsed = true;
@@ -83,18 +91,34 @@ export async function POST(req: NextRequest) {
 
     await prisma.attempt.create({
       data: {
+        userId,
         skill: "writing",
         cefr: assessment.cefrLevel,
         score: levelToScore(assessment.cefrLevel),
         detail: JSON.stringify({ promptId, wordCount, essay, ...assessment }),
       },
     });
-    await applyWritingLevel(assessment.cefrLevel);
+    await applyWritingLevel(userId, assessment.cefrLevel);
     try {
-      await recordStudyActivity();
+      await recordStudyActivity(userId);
+      await awardPoints(userId, POINTS_PER_ACTIVITY.writing);
     } catch (err) {
-      // Không để lỗi cập nhật streak (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
-      console.error("[streak] lỗi khi cập nhật (không nghiêm trọng):", err);
+      // Không để lỗi cập nhật streak/điểm (phụ) làm hỏng thông báo thành công của kết quả chính (đã lưu).
+      console.error("[streak/points] lỗi khi cập nhật (không nghiêm trọng):", err);
+    }
+    if (assessment.errors.length > 0) {
+      prisma.mistakeRecord
+        .createMany({
+          data: assessment.errors.map((e) => ({
+            userId,
+            skill: "writing",
+            category: e.category,
+            original: e.original,
+            correction: e.correction,
+            explanation: e.explanation,
+          })),
+        })
+        .catch((err) => console.error("[writing] lỗi lưu MistakeRecord (không nghiêm trọng):", err));
     }
 
     // Trả lại đúng bản essay đã được chấm (đã trim/cắt) để client highlight lỗi

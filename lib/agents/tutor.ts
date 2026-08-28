@@ -1,4 +1,4 @@
-import { getGemini, GEMINI_MODEL } from "@/lib/gemini";
+import { getGemini, GEMINI_MODEL, GEMINI_MODEL_LITE } from "@/lib/gemini";
 import { CefrLevel, CEFR_DESCRIPTIONS } from "@/lib/cefr";
 
 // AGENT "TUTOR" — người dạy/trò chuyện.
@@ -72,4 +72,52 @@ export async function* streamTutorReply(
     const text = chunk.text();
     if (text) yield text;
   }
+}
+
+export interface AnswerSuggestion {
+  suggestion: string;
+  explanation: string;
+}
+
+// Gợi ý cách trả lời câu hỏi AI vừa hỏi trong lúc luyện Nói (Trò chuyện tự do) —
+// bấm mới gọi (xem app/(app)/speaking/page.tsx), KHÔNG tự động, để không làm mất
+// tính chủ động luyện tập. Stateless — chỉ cần câu hỏi + trình độ, model rẻ vì
+// đây là gợi ý phụ, không phải hội thoại chính.
+export async function suggestAnswer(question: string, level: CefrLevel): Promise<AnswerSuggestion> {
+  const model = getGemini().getGenerativeModel({
+    model: GEMINI_MODEL_LITE,
+    systemInstruction:
+      "You help a Vietnamese English learner practice speaking. Given a question their AI " +
+      "conversation partner just asked, suggest ONE natural, complete sample spoken answer at the " +
+      "learner's CEFR level, plus a short Vietnamese explanation of why it's a good answer (structure, " +
+      "useful vocabulary). The learner will read this before answering out loud in their own words — " +
+      "keep the suggestion short and spoken-friendly (1-2 sentences), not a lecture. Output ONLY valid " +
+      "JSON matching the requested schema — no markdown, no commentary.",
+    generationConfig: { responseMimeType: "application/json" },
+  });
+
+  const prompt = `The learner's CEFR level is ${level}. The AI just asked them:
+"""
+${question}
+"""
+
+Return JSON with EXACTLY this shape:
+{ "suggestion": "<a natural 1-2 sentence sample spoken answer>", "explanation": "<short Vietnamese explanation of why this is a good answer>" }`;
+
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text();
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("AI trả về dữ liệu không hợp lệ, không thể gợi ý.");
+    parsed = JSON.parse(match[0]);
+  }
+
+  const suggestion = typeof parsed.suggestion === "string" ? parsed.suggestion.trim() : "";
+  const explanation = typeof parsed.explanation === "string" ? parsed.explanation.trim() : "";
+  if (!suggestion) throw new Error("AI trả về dữ liệu không hợp lệ, không thể gợi ý.");
+  return { suggestion, explanation };
 }
