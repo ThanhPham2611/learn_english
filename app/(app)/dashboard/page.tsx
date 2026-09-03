@@ -25,6 +25,7 @@ const SKILL_VI: Record<string, string> = {
   speaking: "Nói",
   reading: "Đọc",
   listening: "Nghe",
+  dictation: "Nghe-Viết",
 };
 
 function formatDate(iso: string): string {

@@ -646,7 +646,7 @@ export default function DictationPage() {
               ? <>Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để kiểm tra. Không cần gõ đúng hoa thường.</>
               : allCorrect
                 ? <>Tuyệt vời! Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để sang câu tiếp.</>
-                : <>Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để thử lại, hoặc "Bỏ qua" để sang câu tiếp.</>
+                : <>Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để thử lại, hoặc &quot;Bỏ qua&quot; để sang câu tiếp.</>
             }
           </p>
         </div>
