@@ -117,9 +117,18 @@ export async function POST(req: NextRequest) {
   const fileHash = hashAudioBuffer(audioBuffer);
 
   // --- Lookup cache ---
-  const cached = await prisma.audioTranscript.findUnique({
-    where: { userId_fileHash: { userId, fileHash } },
-  });
+  let cached;
+  try {
+    cached = await prisma.audioTranscript.findUnique({
+      where: { userId_fileHash: { userId, fileHash } },
+    });
+  } catch (err) {
+    console.error("[dictation/transcribe] Lỗi truy vấn cache:", err);
+    return Response.json(
+      { error: "Lỗi kết nối cơ sở dữ liệu. Hãy thử lại sau." },
+      { status: 500 }
+    );
+  }
 
   let segments: DictationSegment[];
   if (cached?.segmentsJson) {
