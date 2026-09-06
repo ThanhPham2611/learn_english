@@ -3,7 +3,8 @@
 /**
  * app/(app)/dictation/page.tsx
  *
- * Tính năng Nghe-Viết: upload audio → transcribe → nghe từng đoạn → gõ lại → chấm lỗi ký tự.
+ * Tính năng Nghe-Viết: upload audio → transcribe (kèm mốc thời gian từng câu)
+ * → nghe ĐÚNG đoạn audio gốc của từng câu → gõ lại → chấm lỗi ký tự.
  *
  * 3 phase:
  *   "upload"    — chọn file + nút bắt đầu
@@ -13,12 +14,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { diffChunk, calcScore, WordResult } from "@/lib/dictation";
+import { diffChunk, calcScore, DictationSegment, WordResult } from "@/lib/dictation";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 type Phase = "upload" | "processing" | "practice" | "result";
+
+const RATE_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 interface ChunkPracticeState {
   typedText: string;
@@ -34,20 +37,6 @@ interface SaveResult {
   cefrLevel: string;
   correct: number;
   total: number;
-}
-
-// ---------------------------------------------------------------------------
-// TTS helper (Web Speech API) — dùng để đọc text của từng đoạn
-// ---------------------------------------------------------------------------
-function speakText(text: string, onEnd?: () => void): boolean {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) return false;
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  u.rate = 0.9;
-  if (onEnd) u.onend = onEnd;
-  window.speechSynthesis.speak(u);
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +89,48 @@ function ProgressBar({ current, total }: { current: number; total: number }) {
   );
 }
 
+/** Danh sách câu dạng số — bấm để nhảy tới câu bất kỳ (không lộ nội dung câu) */
+function SegmentPills({
+  segments,
+  states,
+  currentIndex,
+  onJump,
+}: {
+  segments: DictationSegment[];
+  states: ChunkPracticeState[];
+  currentIndex: number;
+  onJump: (idx: number) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {segments.map((_, idx) => {
+        const s = states[idx];
+        const isCurrent = idx === currentIndex;
+        const correct = s.submitted && (s.wordResults?.every((w) => w.isCorrect) ?? false);
+        const wrong = s.submitted && !correct;
+        return (
+          <button
+            key={idx}
+            onClick={() => onJump(idx)}
+            aria-label={`Câu ${idx + 1}`}
+            className={`h-7 w-7 shrink-0 cursor-pointer rounded-full text-xs font-medium transition-colors ${
+              isCurrent
+                ? "bg-primary text-white"
+                : correct
+                  ? "bg-primary/15 text-primary-text hover:bg-primary/25"
+                  : wrong
+                    ? "bg-accent/15 text-accent-text hover:bg-accent/25"
+                    : "border border-border text-muted hover:border-primary"
+            }`}
+          >
+            {idx + 1}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
@@ -110,17 +141,19 @@ export default function DictationPage() {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioDuration, setAudioDuration] = useState(0);
   const [uploadError, setUploadError] = useState("");
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const audioElRef = useRef<HTMLAudioElement>(null);
   const hiddenAudioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [audioObjectUrl, setAudioObjectUrl] = useState<string | null>(null);
 
   // Practice phase
-  const [chunks, setChunks] = useState<string[]>([]);
+  const [segments, setSegments] = useState<DictationSegment[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [practiceStates, setPracticeStates] = useState<ChunkPracticeState[]>([]);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [practiceError, setPracticeError] = useState("");
+  const segmentEndRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Result phase
@@ -228,17 +261,17 @@ export default function DictationPage() {
         return;
       }
 
-      const chunkList: string[] = data.chunks ?? [];
-      if (chunkList.length === 0) {
+      const segmentList: DictationSegment[] = data.segments ?? [];
+      if (segmentList.length === 0) {
         setUploadError("Không nhận ra nội dung tiếng Anh trong file.");
         setPhase("upload");
         return;
       }
 
-      setChunks(chunkList);
+      setSegments(segmentList);
       setCurrentIndex(0);
       setPracticeStates(
-        chunkList.map(() => ({
+        segmentList.map(() => ({
           typedText: "",
           submitted: false,
           wordResults: null,
@@ -254,23 +287,37 @@ export default function DictationPage() {
   }
 
   // ---------------------------------------------------------------------------
-  // Practice phase handlers
+  // Practice phase handlers — phát ĐÚNG đoạn audio gốc theo mốc start/end
   // ---------------------------------------------------------------------------
-  function handleSpeak() {
-    if (isSpeaking || !chunks[currentIndex]) return;
-    setIsSpeaking(true);
-    const ok = speakText(chunks[currentIndex], () => setIsSpeaking(false));
-    if (!ok) {
-      setIsSpeaking(false);
-      setPracticeError("Trình duyệt không hỗ trợ phát âm thanh. Hãy dùng Chrome hoặc Edge.");
+  function playSegment(index: number) {
+    const audio = audioElRef.current;
+    const segment = segments[index];
+    if (!audio || !segment) return;
+    setPracticeError("");
+    segmentEndRef.current = segment.end;
+    audio.playbackRate = playbackRate;
+    audio.currentTime = segment.start;
+    audio.play().catch(() => setPracticeError("Không phát được audio. Hãy thử lại."));
+  }
+
+  function handleTimeUpdate() {
+    const audio = audioElRef.current;
+    if (!audio) return;
+    if (audio.currentTime >= segmentEndRef.current - 0.02) {
+      audio.pause();
     }
+  }
+
+  function handleSetRate(rate: number) {
+    setPlaybackRate(rate);
+    if (audioElRef.current) audioElRef.current.playbackRate = rate;
   }
 
   function handleCheckChunk() {
     const current = practiceStates[currentIndex];
     if (!current.typedText.trim()) return;
 
-    const results = diffChunk(chunks[currentIndex], current.typedText);
+    const results = diffChunk(segments[currentIndex].text, current.typedText);
     const allCorrect = results.every((w) => w.isCorrect);
 
     // Giữ lại kết quả tốt nhất (nhiều từ đúng hơn) qua các lần thử
@@ -316,9 +363,17 @@ export default function DictationPage() {
     }, 0);
   }
 
+  /** Nhảy tới câu bất kỳ (từ danh sách số) — tự phát luôn đoạn audio của câu đó */
+  function handleJumpTo(idx: number) {
+    setCurrentIndex(idx);
+    playSegment(idx);
+  }
+
   function handleNextChunk() {
-    if (currentIndex < chunks.length - 1) {
-      setCurrentIndex((i) => i + 1);
+    if (currentIndex < segments.length - 1) {
+      const next = currentIndex + 1;
+      setCurrentIndex(next);
+      playSegment(next);
     } else {
       finishPractice();
     }
@@ -329,7 +384,7 @@ export default function DictationPage() {
     const allResults = practiceStates.map((s, i) => {
       const best = s.bestWordResults ?? s.wordResults;
       if (best) return best;
-      return diffChunk(chunks[i], ""); // chưa làm → tính sai hết
+      return diffChunk(segments[i].text, ""); // chưa làm → tính sai hết
     });
     setAllWordResults(allResults);
     setPhase("result");
@@ -368,17 +423,35 @@ export default function DictationPage() {
     setAudioDuration(0);
     setUploadError("");
     setPracticeError("");
-    setChunks([]);
+    setSegments([]);
     setCurrentIndex(0);
     setPracticeStates([]);
     setAllWordResults([]);
     setSaveResult(null);
     setSaveError("");
+    setPlaybackRate(1);
     if (audioObjectUrl) {
       URL.revokeObjectURL(audioObjectUrl);
       setAudioObjectUrl(null);
     }
   }
+
+  // Audio element dùng chung cho cả preview (upload phase) và phát đoạn (practice
+  // phase) — chỉ 1 instance để giữ được currentTime/seek liền mạch giữa các phase.
+  const audioElement = audioObjectUrl && (
+    // eslint-disable-next-line jsx-a11y/media-has-caption
+    <audio
+      ref={audioElRef}
+      src={audioObjectUrl}
+      controls={phase === "upload" || phase === "processing"}
+      onPlay={() => setIsPlaying(true)}
+      onPause={() => setIsPlaying(false)}
+      onEnded={() => setIsPlaying(false)}
+      onTimeUpdate={phase === "practice" ? handleTimeUpdate : undefined}
+      onError={() => phase === "practice" && setPracticeError("Không phát được audio. Hãy thử lại.")}
+      className={phase === "upload" || phase === "processing" ? "w-full rounded-lg" : "hidden"}
+    />
+  );
 
   // ---------------------------------------------------------------------------
   // Render: Upload phase
@@ -441,15 +514,7 @@ export default function DictationPage() {
         )}
 
         {/* Preview audio nếu có */}
-        {audioObjectUrl && audioFile && !processing && (
-          // eslint-disable-next-line jsx-a11y/media-has-caption
-          <audio
-            ref={audioRef}
-            src={audioObjectUrl}
-            controls
-            className="w-full rounded-lg"
-          />
-        )}
+        {audioFile && !processing && audioElement}
 
         <button
           onClick={handleStartPractice}
@@ -470,9 +535,9 @@ export default function DictationPage() {
           <p className="text-xs font-medium text-muted mb-2">Cách hoạt động</p>
           <ol className="flex flex-col gap-1.5 text-xs text-muted list-decimal list-inside">
             <li>Upload file audio tiếng Anh (podcast, bài giảng, hội thoại…)</li>
-            <li>Hệ thống tự chuyển âm thanh thành văn bản (AI transcribe)</li>
-            <li>Văn bản được chia thành từng câu hoàn chỉnh</li>
-            <li>Nghe từng câu rồi gõ lại — gõ sai có thể thử lại nhiều lần đến khi đúng</li>
+            <li>Hệ thống tự chuyển âm thanh thành văn bản kèm mốc thời gian từng câu (AI transcribe)</li>
+            <li>Nghe đúng đoạn audio gốc của từng câu rồi gõ lại — có thể chỉnh tốc độ phát</li>
+            <li>Gõ sai có thể nghe lại và thử lại nhiều lần đến khi đúng</li>
           </ol>
         </div>
       </div>
@@ -484,13 +549,14 @@ export default function DictationPage() {
   // ---------------------------------------------------------------------------
   if (phase === "practice") {
     const state = practiceStates[currentIndex];
-    const isLast = currentIndex === chunks.length - 1;
+    const isLast = currentIndex === segments.length - 1;
     const allCorrect = state.wordResults?.every((w) => w.isCorrect) ?? false;
     const canCheck = !state.submitted && state.typedText.trim().length > 0;
-    const canNext = state.submitted; // có thể next bất kể đúng hay sai
 
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-5">
+        {audioElement}
+
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Nghe-Viết</h1>
           <button
@@ -502,29 +568,55 @@ export default function DictationPage() {
         </div>
 
         {/* Progress */}
-        <ProgressBar current={currentIndex + 1} total={chunks.length} />
+        <ProgressBar current={currentIndex + 1} total={segments.length} />
+
+        {/* Danh sách câu — bấm để nhảy tới câu bất kỳ */}
+        <SegmentPills
+          segments={segments}
+          states={practiceStates}
+          currentIndex={currentIndex}
+          onJump={handleJumpTo}
+        />
 
         {/* Audio player card */}
         <div className="rounded-xl border border-border bg-surface p-5">
           <p className="text-sm text-muted mb-3">
-            Câu {currentIndex + 1}/{chunks.length} — Nghe rồi gõ lại bên dưới
+            Câu {currentIndex + 1}/{segments.length} — Nghe rồi gõ lại bên dưới
           </p>
 
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
-              onClick={handleSpeak}
-              disabled={isSpeaking}
+              onClick={() => playSegment(currentIndex)}
+              disabled={isPlaying}
               className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 font-medium text-sm text-white transition-colors duration-200 hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isSpeaking ? (
+              {isPlaying ? (
                 <>
                   <span className="inline-block h-3.5 w-3.5 animate-pulse rounded-full bg-white" />
                   Đang phát…
                 </>
               ) : (
-                <>🔊 Nghe câu này</>
+                <>▶ Nghe câu này</>
               )}
             </button>
+          </div>
+
+          {/* Tốc độ phát */}
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted mr-1">Tốc độ:</span>
+            {RATE_OPTIONS.map((r) => (
+              <button
+                key={r}
+                onClick={() => handleSetRate(r)}
+                className={`cursor-pointer rounded-lg px-2 py-1 text-xs font-medium transition-colors ${
+                  playbackRate === r
+                    ? "bg-primary text-white"
+                    : "border border-border text-muted hover:border-primary"
+                }`}
+              >
+                {r}x
+              </button>
+            ))}
           </div>
 
           {practiceError && (
@@ -558,7 +650,7 @@ export default function DictationPage() {
               {state.attempts >= 2 && (
                 <div className="mt-3 rounded-lg bg-bg p-3">
                   <p className="text-xs text-muted mb-1">Bản gốc:</p>
-                  <p className="text-sm font-mono">{chunks[currentIndex]}</p>
+                  <p className="text-sm font-mono">{segments[currentIndex].text}</p>
                 </div>
               )}
             </div>
@@ -587,7 +679,7 @@ export default function DictationPage() {
                 e.preventDefault();
                 if (canCheck) handleCheckChunk();
                 else if (state.submitted && !allCorrect) handleRetry();
-                else if (canNext) handleNextChunk();
+                else if (state.submitted) handleNextChunk();
               }
             }}
             disabled={state.submitted}
@@ -632,12 +724,12 @@ export default function DictationPage() {
               </>
             )}
             <button
-              onClick={handleSpeak}
-              disabled={isSpeaking}
+              onClick={() => playSegment(currentIndex)}
+              disabled={isPlaying}
               aria-label="Nghe lại"
-              className="rounded-xl border border-border px-4 py-2.5 text-sm transition-colors hover:border-primary disabled:opacity-50"
+              className="cursor-pointer rounded-xl border border-border px-4 py-2.5 text-sm transition-colors hover:border-primary disabled:opacity-50"
             >
-              🔊
+              🔁
             </button>
           </div>
 
@@ -724,7 +816,7 @@ export default function DictationPage() {
               <WordDiffDisplay results={results} />
               {!allRight && (
                 <p className="mt-2 text-xs font-mono text-muted bg-bg rounded px-2 py-1">
-                  {chunks[idx]}
+                  {segments[idx].text}
                 </p>
               )}
             </div>

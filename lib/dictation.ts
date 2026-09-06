@@ -6,74 +6,16 @@
  * KHÔNG gọi API — tất cả là thuật toán, không tốn phí.
  */
 
-// ---------------------------------------------------------------------------
-// 1. Chia transcript thành các đoạn theo câu hoàn chỉnh
-// ---------------------------------------------------------------------------
-
-/**
- * Chia transcript thành mảng các đoạn, mỗi đoạn là 1 hoặc nhiều câu HOÀN CHỈNH.
- *
- * Nguyên tắc:
- * - Tách theo dấu kết câu: `.` `?` `!` (giữ dấu ở cuối câu)
- * - Ghép các câu liền nhau lại nếu tổng chưa quá `maxWords` (mặc định 20)
- * - Câu đơn lẻ dài hơn `maxWords` vẫn được giữ nguyên 1 chunk (không cắt giữa câu)
- * - Câu quá ngắn (< `minWords`, mặc định 4 từ) tự động ghép với câu tiếp theo
- *
- * Kết quả: mỗi chunk luôn kết thúc ở ranh giới câu, không cắt ngang giữa câu.
- */
-export function chunkTranscript(
-  transcript: string,
-  maxWords = 12,
-  minWords = 3
-): string[] {
-  if (!transcript.trim()) return [];
-
-  // Tách câu — giữ dấu kết câu gắn với câu đó
-  // Regex: tách tại `.` `?` `!` theo sau là khoảng trắng/hết chuỗi
-  const sentences = transcript
-    .trim()
-    .split(/(?<=[.?!])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (sentences.length === 0) return [transcript.trim()];
-
-  const chunks: string[] = [];
-  let currentSentences: string[] = [];
-  let currentWordCount = 0;
-
-  for (const sentence of sentences) {
-    const wordCount = sentence.split(/\s+/).filter(Boolean).length;
-
-    const wouldExceed = currentWordCount + wordCount > maxWords;
-    const currentTooShort = currentWordCount < minWords;
-
-    if (currentSentences.length === 0) {
-      // Chunk trống → luôn thêm câu này vào
-      currentSentences.push(sentence);
-      currentWordCount += wordCount;
-    } else if (!wouldExceed || currentTooShort) {
-      // Vẫn còn chỗ, hoặc chunk hiện tại quá ngắn → ghép thêm
-      currentSentences.push(sentence);
-      currentWordCount += wordCount;
-    } else {
-      // Chunk đầy → đóng chunk hiện tại, bắt đầu chunk mới
-      chunks.push(currentSentences.join(" "));
-      currentSentences = [sentence];
-      currentWordCount = wordCount;
-    }
-  }
-
-  // Đoạn cuối còn lại
-  if (currentSentences.length > 0) {
-    chunks.push(currentSentences.join(" "));
-  }
-
-  return chunks.filter(Boolean);
+// Một câu trong audio gốc, kèm mốc thời gian để phát lại đúng đoạn audio đó
+// (thay vì đọc lại bằng TTS) — start/end tính bằng giây, gốc = đầu file.
+export interface DictationSegment {
+  text: string;
+  start: number;
+  end: number;
 }
 
 // ---------------------------------------------------------------------------
-// 2. Edit distance (Levenshtein) + backtrace ở cấp ký tự
+// 1. Edit distance (Levenshtein) + backtrace ở cấp ký tự
 // ---------------------------------------------------------------------------
 
 export interface CharDiffResult {
@@ -152,7 +94,7 @@ export function diffWord(correct: string, typed: string): CharDiffResult {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Word-level alignment + char diff cho cả đoạn
+// 2. Word-level alignment + char diff cho cả đoạn
 // ---------------------------------------------------------------------------
 
 /**
@@ -254,7 +196,7 @@ function alignWords(correct: string[], typed: string[]): [string, string][] {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Tính điểm accuracy cho 1 lượt luyện
+// 3. Tính điểm accuracy cho 1 lượt luyện
 // ---------------------------------------------------------------------------
 
 export interface DictationScore {

@@ -9,17 +9,21 @@
  * 1. Auth check
  * 2. Validate file type + duration ≤ 180s
  * 3. Hash file → lookup cache AudioTranscript
- * 4. Cache miss → gửi audio inline base64 lên Gemini để transcribe
- * 5. Lưu cache → chia chunks → trả về
+ * 4. Cache miss → gửi audio inline base64 lên Gemini, xin transcribe kèm
+ *    mốc thời gian bắt đầu/kết thúc của TỪNG câu (JSON) — dùng để phát lại
+ *    đúng đoạn audio gốc theo câu khi luyện tập, thay vì đọc lại bằng TTS.
+ * 5. Lưu cache → trả về danh sách segment
  *
  * Dùng Gemini 2.5 Flash (model đã cấu hình trong GEMINI_MODEL) thay vì
  * OpenAI Whisper → không cần OPENAI_API_KEY, dùng lại GEMINI_API_KEY sẵn có.
+ * Đánh đổi: Gemini không phải forced-aligner chuyên dụng nên mốc thời gian có
+ * thể lệch chút ít, nhưng đủ dùng để luyện nghe và không tốn thêm chi phí/API key.
  */
 
 import { NextRequest } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { hashAudioBuffer } from "@/lib/audio-hash";
-import { chunkTranscript } from "@/lib/dictation";
+import { DictationSegment } from "@/lib/dictation";
 import { prisma } from "@/lib/db";
 import { getGemini, GEMINI_MODEL } from "@/lib/gemini";
 
@@ -42,6 +46,16 @@ const ALLOWED_AUDIO_TYPES = new Set([
   "audio/flac",
   "video/webm", // webm thường bị báo sai mime type khi record trực tiếp
 ]);
+
+const TRANSCRIBE_PROMPT =
+  "Transcribe the English speech in this audio file and split it into individual sentences. " +
+  "For EACH sentence, give the exact start and end time (in seconds, decimal, 0 = start of file) " +
+  "matching when that sentence is actually spoken in the audio. " +
+  "Output ONLY valid JSON — no markdown code fences, no explanation — in exactly this shape: " +
+  '[{"text": "sentence text", "start": 0.0, "end": 3.2}, ...] ' +
+  "Rules: sentences must be in chronological order and cover all spoken content; " +
+  "each array item is exactly one sentence (do not merge multiple sentences into one item); " +
+  "do not add speaker labels or any commentary inside \"text\".";
 
 export async function POST(req: NextRequest) {
   const userId = await getCurrentUserId();
@@ -107,11 +121,11 @@ export async function POST(req: NextRequest) {
     where: { userId_fileHash: { userId, fileHash } },
   });
 
-  let transcript: string;
-  if (cached) {
-    transcript = cached.transcript;
+  let segments: DictationSegment[];
+  if (cached?.segmentsJson) {
+    segments = JSON.parse(cached.segmentsJson);
   } else {
-    // --- Gọi Gemini để transcribe ---
+    // --- Gọi Gemini để transcribe + lấy timestamp từng câu ---
     try {
       const gemini = getGemini();
       const model = gemini.getGenerativeModel({ model: GEMINI_MODEL });
@@ -120,34 +134,37 @@ export async function POST(req: NextRequest) {
       const base64Audio = audioBuffer.toString("base64");
       const effectiveMime = normalizeMime(mimeType);
 
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            mimeType: effectiveMime,
-            data: base64Audio,
-          },
-        },
-        {
-          text:
-            "Transcribe the English speech in this audio file. " +
-            "Output ONLY the transcribed text, exactly as spoken. " +
-            "Do NOT add any explanations, timestamps, speaker labels, punctuation corrections, " +
-            "or any other commentary. Just the raw spoken words.",
-        },
-      ]);
+      const parts = [
+        { inlineData: { mimeType: effectiveMime, data: base64Audio } },
+        { text: TRANSCRIBE_PROMPT },
+      ];
 
-      transcript = result.response.text().trim();
+      // Gemini thỉnh thoảng trả JSON không hợp lệ (thừa text, thiếu dấu…) —
+      // thử tối đa 2 lần trước khi báo lỗi cho user.
+      let parsed: DictationSegment[] | null = null;
+      let lastRawText = "";
+      for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+        const result = await model.generateContent(parts);
+        lastRawText = result.response.text().trim();
+        parsed = parseSegments(lastRawText, durationSec);
+      }
 
-      if (!transcript) {
+      if (!parsed || parsed.length === 0) {
+        console.error("[dictation/transcribe] Không parse được segments:", lastRawText);
         return Response.json(
           { error: "Không nhận ra giọng nói trong file. Hãy thử file khác." },
           { status: 422 }
         );
       }
 
+      segments = parsed;
+      const transcript = segments.map((s) => s.text).join(" ");
+
       // Lưu cache
-      await prisma.audioTranscript.create({
-        data: { userId, fileHash, transcript, durationSec },
+      await prisma.audioTranscript.upsert({
+        where: { userId_fileHash: { userId, fileHash } },
+        create: { userId, fileHash, transcript, segmentsJson: JSON.stringify(segments), durationSec },
+        update: { transcript, segmentsJson: JSON.stringify(segments), durationSec },
       });
     } catch (err) {
       console.error("[dictation/transcribe] Gemini error:", err);
@@ -166,9 +183,40 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const chunks = chunkTranscript(transcript);
+  return Response.json({ segments });
+}
 
-  return Response.json({ chunks, transcript });
+/**
+ * Parse + validate JSON segments từ output của Gemini.
+ * Trả về null nếu output không phải JSON hợp lệ hoặc không còn segment nào
+ * sau khi lọc dữ liệu hỏng (start/end vô lý, text rỗng…).
+ */
+function parseSegments(raw: string, durationSec: number): DictationSegment[] | null {
+  // Gemini đôi khi bọc JSON trong ```json ... ``` dù đã dặn không làm vậy
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+
+  let data: unknown;
+  try {
+    data = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(data)) return null;
+
+  const segments: DictationSegment[] = [];
+  for (const item of data) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const text = typeof obj.text === "string" ? obj.text.trim() : "";
+    const start = Number(obj.start);
+    const end = Number(obj.end);
+    if (!text) continue;
+    if (!isFinite(start) || !isFinite(end) || start < 0 || end <= start) continue;
+    segments.push({ text, start, end: Math.min(end, durationSec) });
+  }
+
+  segments.sort((a, b) => a.start - b.start);
+  return segments.length > 0 ? segments : null;
 }
 
 /**
