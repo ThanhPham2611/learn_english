@@ -14,6 +14,36 @@ export interface DictationSegment {
   end: number;
 }
 
+// Gemini không phải forced-aligner chuyên dụng nên start/end có thể trễ/sớm vài
+// trăm ms so với thực tế — đủ để nuốt mất 1 từ ngắn ở đầu câu (vd "it's"). Đệm
+// thêm 1 khoảng an toàn ở biên mỗi câu để giảm rủi ro này.
+const START_PAD_SEC = 0.2;
+const END_PAD_SEC = 0.15;
+
+/**
+ * Đệm biên start/end của từng segment — lùi start về trước, đẩy end ra sau —
+ * nhưng không đè lên segment liền kề (so với mốc RAW của segment đó, không
+ * phải mốc đã đệm, để tránh đệm chồng đệm) và không vượt ra ngoài [0, durationSec].
+ *
+ * Chạy ở CLIENT lúc phát lại (không sửa dữ liệu đã lưu ở server/cache) — nhờ vậy
+ * các audio đã transcribe & cache từ trước cũng tự động được hưởng lợi ngay,
+ * không cần xoá cache hay gọi lại Gemini.
+ */
+export function padSegments(
+  segments: DictationSegment[],
+  durationSec: number
+): DictationSegment[] {
+  return segments.map((s, i) => {
+    const prevEnd = i > 0 ? segments[i - 1].end : 0;
+    const nextStart = i < segments.length - 1 ? segments[i + 1].start : durationSec;
+    return {
+      ...s,
+      start: Math.max(prevEnd, s.start - START_PAD_SEC),
+      end: Math.min(nextStart, s.end + END_PAD_SEC, durationSec),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 1. Edit distance (Levenshtein) + backtrace ở cấp ký tự
 // ---------------------------------------------------------------------------

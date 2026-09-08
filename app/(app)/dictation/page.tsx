@@ -12,9 +12,9 @@
  *   "result"    — tổng kết + lưu kết quả
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { diffChunk, calcScore, DictationSegment, WordResult } from "@/lib/dictation";
+import { diffChunk, calcScore, padSegments, DictationSegment, WordResult } from "@/lib/dictation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -154,7 +154,18 @@ export default function DictationPage() {
   const [playbackRate, setPlaybackRate] = useState(1);
   const [practiceError, setPracticeError] = useState("");
   const segmentEndRef = useRef(0);
+  // Huỷ listener "seeked" + timeout fallback đang chờ (nếu có) khi user bấm
+  // phát 1 câu khác trước khi seek trước đó xong, hoặc khi thoát/unmount.
+  const seekCleanupRef = useRef<(() => void) | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Đệm biên start/end mỗi câu để giảm rủi ro nuốt/méo âm đầu-cuối câu do
+  // timestamp Gemini trả thô (xem lib/dictation.ts). Chỉ dùng cho lúc PHÁT —
+  // mọi nơi hiển thị/so sánh nội dung câu vẫn dùng `segments` (raw).
+  const paddedSegments = useMemo(
+    () => padSegments(segments, audioDuration),
+    [segments, audioDuration]
+  );
 
   // Result phase
   const [allWordResults, setAllWordResults] = useState<WordResult[][]>([]);
@@ -168,6 +179,13 @@ export default function DictationPage() {
       if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
     };
   }, [audioObjectUrl]);
+
+  // Huỷ chờ-seek còn treo (nếu có) khi component unmount
+  useEffect(() => {
+    return () => {
+      seekCleanupRef.current?.();
+    };
+  }, []);
 
   // Focus textarea khi sang đoạn mới
   useEffect(() => {
@@ -291,13 +309,38 @@ export default function DictationPage() {
   // ---------------------------------------------------------------------------
   function playSegment(index: number) {
     const audio = audioElRef.current;
-    const segment = segments[index];
+    const segment = paddedSegments[index];
     if (!audio || !segment) return;
     setPracticeError("");
+
+    // Huỷ lần chờ-seek trước đó nếu user bấm chuyển câu liên tục
+    seekCleanupRef.current?.();
+    // Pause trước khi seek — tránh audio phát tiếp vài chục ms từ vị trí cũ
+    // trong lúc seek đang xử lý bất đồng bộ (gây tiếng méo/lạ ở đầu câu mới)
+    audio.pause();
+
     segmentEndRef.current = segment.end;
     audio.playbackRate = playbackRate;
+
+    // Đợi browser seek xong (sự kiện "seeked") rồi mới play, để không phát
+    // nhầm từ vị trí cũ. Có timeout fallback phòng trường hợp "seeked" không
+    // bắn (vd seek tới đúng currentTime hiện tại) — dù đường nào kích hoạt
+    // trước, cleanup() đều huỷ luôn đường còn lại để không bị play() "ma"
+    // trễ 400ms sau khi user đã chuyển sang câu khác.
+    const cleanup = () => {
+      audio.removeEventListener("seeked", doPlay);
+      clearTimeout(timeoutId);
+      seekCleanupRef.current = null;
+    };
+    const doPlay = () => {
+      cleanup();
+      audio.play().catch(() => setPracticeError("Không phát được audio. Hãy thử lại."));
+    };
+    audio.addEventListener("seeked", doPlay, { once: true });
+    const timeoutId = window.setTimeout(doPlay, 400);
+    seekCleanupRef.current = cleanup;
+
     audio.currentTime = segment.start;
-    audio.play().catch(() => setPracticeError("Không phát được audio. Hãy thử lại."));
   }
 
   function handleTimeUpdate() {
@@ -418,6 +461,7 @@ export default function DictationPage() {
   }
 
   function handleReset() {
+    seekCleanupRef.current?.();
     setPhase("upload");
     setAudioFile(null);
     setAudioDuration(0);
