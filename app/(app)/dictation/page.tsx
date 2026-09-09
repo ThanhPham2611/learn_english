@@ -12,9 +12,9 @@
  *   "result"    — tổng kết + lưu kết quả
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { diffChunk, calcScore, padSegments, DictationSegment, WordResult } from "@/lib/dictation";
+import { diffChunk, calcScore, DictationSegment, WordResult } from "@/lib/dictation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,15 +157,13 @@ export default function DictationPage() {
   // Huỷ listener "seeked" + timeout fallback đang chờ (nếu có) khi user bấm
   // phát 1 câu khác trước khi seek trước đó xong, hoặc khi thoát/unmount.
   const seekCleanupRef = useRef<(() => void) | null>(null);
+  // Huỷ vòng canh mốc kết thúc câu (requestAnimationFrame) đang chạy — xem
+  // watchSegmentEnd().
+  const endWatchRef = useRef<(() => void) | null>(null);
+  // Tăng mỗi lần playSegment được gọi. Promise của audio.play() không huỷ được,
+  // nên dùng token này để lượt phát cũ tự nhận ra mình đã bị thay thế.
+  const playTokenRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  // Đệm biên start/end mỗi câu để giảm rủi ro nuốt/méo âm đầu-cuối câu do
-  // timestamp Gemini trả thô (xem lib/dictation.ts). Chỉ dùng cho lúc PHÁT —
-  // mọi nơi hiển thị/so sánh nội dung câu vẫn dùng `segments` (raw).
-  const paddedSegments = useMemo(
-    () => padSegments(segments, audioDuration),
-    [segments, audioDuration]
-  );
 
   // Result phase
   const [allWordResults, setAllWordResults] = useState<WordResult[][]>([]);
@@ -180,10 +178,11 @@ export default function DictationPage() {
     };
   }, [audioObjectUrl]);
 
-  // Huỷ chờ-seek còn treo (nếu có) khi component unmount
+  // Huỷ chờ-seek + vòng canh mốc kết thúc còn treo (nếu có) khi component unmount
   useEffect(() => {
     return () => {
       seekCleanupRef.current?.();
+      endWatchRef.current?.();
     };
   }, []);
 
@@ -309,12 +308,15 @@ export default function DictationPage() {
   // ---------------------------------------------------------------------------
   function playSegment(index: number) {
     const audio = audioElRef.current;
-    const segment = paddedSegments[index];
+    const segment = segments[index];
     if (!audio || !segment) return;
     setPracticeError("");
 
-    // Huỷ lần chờ-seek trước đó nếu user bấm chuyển câu liên tục
+    // Huỷ lần chờ-seek + vòng canh mốc kết thúc trước đó, nếu user bấm chuyển
+    // câu liên tục
     seekCleanupRef.current?.();
+    endWatchRef.current?.();
+    const token = ++playTokenRef.current;
     // Pause trước khi seek — tránh audio phát tiếp vài chục ms từ vị trí cũ
     // trong lúc seek đang xử lý bất đồng bộ (gây tiếng méo/lạ ở đầu câu mới)
     audio.pause();
@@ -334,7 +336,18 @@ export default function DictationPage() {
     };
     const doPlay = () => {
       cleanup();
-      audio.play().catch(() => setPracticeError("Không phát được audio. Hãy thử lại."));
+      audio
+        .play()
+        .then(() => {
+          // Lượt phát này đã bị lượt sau thay thế trong lúc play() còn treo →
+          // bỏ qua, nếu không sẽ canh câu mới bằng mốc end của câu cũ.
+          if (playTokenRef.current !== token) return;
+          watchSegmentEnd(audio, segment.end);
+        })
+        .catch(() => {
+          if (playTokenRef.current !== token) return;
+          setPracticeError("Không phát được audio. Hãy thử lại.");
+        });
     };
     audio.addEventListener("seeked", doPlay, { once: true });
     const timeoutId = window.setTimeout(doPlay, 400);
@@ -343,6 +356,47 @@ export default function DictationPage() {
     audio.currentTime = segment.start;
   }
 
+  /**
+   * Canh mốc kết thúc câu bằng requestAnimationFrame (~60 lần/giây, sai số
+   * ~16ms).
+   *
+   * KHÔNG dùng sự kiện "timeupdate" làm cơ chế chính: trình duyệt chỉ bắn nó
+   * ~4 lần/giây (đo thật: ~266ms/lần), nên audio luôn chạy quá mốc `end` tới
+   * cả phần tư giây trước khi pause() kịp chạy — đủ để nghe lọt nguyên từ đầu
+   * của câu kế tiếp, tức là lộ đáp án. Ở tốc độ phát nhanh còn tệ hơn (đo ở
+   * 1.5x: vọt 188-357ms).
+   *
+   * KHÔNG dùng setTimeout hẹn đúng thời lượng còn lại: nếu user hạ tốc độ phát
+   * giữa chừng thì hẹn giờ sẽ bắn sớm và cắt cụt câu. Đọc currentTime thật qua
+   * rAF thì tự đúng ở mọi tốc độ.
+   */
+  function watchSegmentEnd(audio: HTMLAudioElement, end: number) {
+    endWatchRef.current?.();
+
+    let rafId = 0;
+    const cancel = () => {
+      cancelAnimationFrame(rafId);
+      endWatchRef.current = null;
+    };
+    const tick = () => {
+      if (audio.paused) return cancel(); // user tự bấm pause
+      if (audio.currentTime >= end - 0.005) {
+        cancel();
+        audio.pause();
+        return;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    endWatchRef.current = cancel;
+  }
+
+  /**
+   * Lưới an toàn cho trường hợp user chuyển sang tab khác: khi tab bị ẩn,
+   * trình duyệt ngưng chạy requestAnimationFrame nên watchSegmentEnd đứng
+   * hình, còn "timeupdate" là sự kiện media thì vẫn bắn đều.
+   */
   function handleTimeUpdate() {
     const audio = audioElRef.current;
     if (!audio) return;
@@ -462,6 +516,9 @@ export default function DictationPage() {
 
   function handleReset() {
     seekCleanupRef.current?.();
+    endWatchRef.current?.();
+    // Vô hiệu hoá lượt play() nào còn treo, để nó không canh nhầm sau khi reset.
+    playTokenRef.current++;
     setPhase("upload");
     setAudioFile(null);
     setAudioDuration(0);
