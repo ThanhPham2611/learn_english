@@ -186,6 +186,13 @@ export default function DictationPage() {
     };
   }, []);
 
+  // Thẻ <audio> nằm ở vị trí cố định trong cây render nên không bị unmount khi
+  // đổi phase — nhưng vẫn đồng bộ lại isPlaying theo trạng thái THẬT của element
+  // mỗi lần đổi phase, để state không bao giờ lệch và khoá mất nút phát.
+  useEffect(() => {
+    setIsPlaying(!(audioElRef.current?.paused ?? true));
+  }, [phase]);
+
   // Focus textarea khi sang đoạn mới
   useEffect(() => {
     if (phase === "practice") {
@@ -259,6 +266,9 @@ export default function DictationPage() {
   async function handleStartPractice() {
     if (!audioFile || audioDuration <= 0) return;
     setUploadError("");
+    // Dừng preview nếu user vẫn đang nghe thử — không để audio chạy tiếp dưới nền
+    // suốt lúc transcribe.
+    audioElRef.current?.pause();
     setPhase("processing");
 
     try {
@@ -519,6 +529,8 @@ export default function DictationPage() {
     endWatchRef.current?.();
     // Vô hiệu hoá lượt play() nào còn treo, để nó không canh nhầm sau khi reset.
     playTokenRef.current++;
+    audioElRef.current?.pause();
+    setIsPlaying(false);
     setPhase("upload");
     setAudioFile(null);
     setAudioDuration(0);
@@ -539,6 +551,12 @@ export default function DictationPage() {
 
   // Audio element dùng chung cho cả preview (upload phase) và phát đoạn (practice
   // phase) — chỉ 1 instance để giữ được currentTime/seek liền mạch giữa các phase.
+  //
+  // QUAN TRỌNG: nó phải luôn là CON ĐẦU TIÊN của thẻ bọc ngoài ở MỌI phase, để
+  // React tái sử dụng đúng node DOM thay vì unmount/mount lại. Nếu nó bị unmount
+  // trong lúc đang phát (trước đây xảy ra khi bấm "Bắt đầu luyện" giữa lúc nghe
+  // thử), trình duyệt pause node đã tách khỏi DOM và sự kiện "pause" không bao giờ
+  // tới listener của React → isPlaying kẹt ở true.
   const audioElement = audioObjectUrl && (
     // eslint-disable-next-line jsx-a11y/media-has-caption
     <audio
@@ -561,6 +579,8 @@ export default function DictationPage() {
     const processing = phase === "processing";
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-6">
+        {audioFile && audioElement}
+
         <div>
           <h1 className="text-2xl font-semibold">Nghe-Viết</h1>
           <p className="mt-1 text-sm text-muted">
@@ -614,9 +634,6 @@ export default function DictationPage() {
           <p className="rounded-lg bg-accent/10 p-3 text-sm text-accent-text">{uploadError}</p>
         )}
 
-        {/* Preview audio nếu có */}
-        {audioFile && !processing && audioElement}
-
         <button
           onClick={handleStartPractice}
           disabled={!audioFile || processing || audioDuration <= 0}
@@ -656,7 +673,7 @@ export default function DictationPage() {
 
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-5">
-        {audioElement}
+        {audioFile && audioElement}
 
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Nghe-Viết</h1>
@@ -688,13 +705,12 @@ export default function DictationPage() {
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={() => playSegment(currentIndex)}
-              disabled={isPlaying}
-              className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 font-medium text-sm text-white transition-colors duration-200 hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-60"
+              className="flex cursor-pointer items-center gap-2 rounded-xl bg-primary px-4 py-2 font-medium text-sm text-white transition-colors duration-200 hover:bg-primary-dark"
             >
               {isPlaying ? (
                 <>
                   <span className="inline-block h-3.5 w-3.5 animate-pulse rounded-full bg-white" />
-                  Đang phát…
+                  Đang phát… (bấm để nghe lại)
                 </>
               ) : (
                 <>▶ Nghe câu này</>
@@ -826,9 +842,8 @@ export default function DictationPage() {
             )}
             <button
               onClick={() => playSegment(currentIndex)}
-              disabled={isPlaying}
               aria-label="Nghe lại"
-              className="cursor-pointer rounded-xl border border-border px-4 py-2.5 text-sm transition-colors hover:border-primary disabled:opacity-50"
+              className="cursor-pointer rounded-xl border border-border px-4 py-2.5 text-sm transition-colors hover:border-primary"
             >
               🔁
             </button>
@@ -854,6 +869,8 @@ export default function DictationPage() {
 
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-5">
+      {audioFile && audioElement}
+
       <h1 className="text-2xl font-semibold">Kết quả luyện Nghe-Viết</h1>
 
       {/* Score card */}
