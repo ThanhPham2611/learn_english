@@ -2,36 +2,36 @@
  * app/api/dictation/transcribe/route.ts
  *
  * POST multipart/form-data:
- *   - audio: File (audio/*)  max 25MB
+ *   - audio: File (audio/*)  max 20MB
  *   - duration: string (giây, float — user cung cấp từ HTMLMediaElement.duration)
  *
  * Luồng:
  * 1. Auth check
  * 2. Validate file type + duration ≤ 180s
  * 3. Hash file → lookup cache AudioTranscript
- * 4. Cache miss → gửi audio inline base64 lên Gemini, xin transcribe kèm
- *    mốc thời gian bắt đầu/kết thúc của TỪNG câu (JSON) — dùng để phát lại
- *    đúng đoạn audio gốc theo câu khi luyện tập, thay vì đọc lại bằng TTS.
+ * 4. Cache miss → gửi audio lên Groq Whisper, xin transcript kèm mốc thời gian
+ *    TỪNG TỪ, rồi tự gom từ → câu (lib/dictation-segmenter.ts)
  * 5. Lưu cache → trả về danh sách segment
  *
- * Dùng Gemini 2.5 Flash (model đã cấu hình trong GEMINI_MODEL) thay vì
- * OpenAI Whisper → không cần OPENAI_API_KEY, dùng lại GEMINI_API_KEY sẵn có.
- * Đánh đổi: Gemini không phải forced-aligner chuyên dụng nên mốc thời gian có
- * thể lệch chút ít, nhưng đủ dùng để luyện nghe và không tốn thêm chi phí/API key.
+ * Dùng Groq Whisper (whisper-large-v3) thay vì Gemini: Gemini không phải
+ * forced-aligner, nó chỉ "đoán" mốc thời gian bằng ngôn ngữ nên lệch dần về
+ * cuối file và hay cắt giữa câu. Whisper trả timestamp cấp TỪ sinh từ alignment
+ * thật với sóng âm → cắt câu bám đúng từ, không nuốt đầu/cuối câu.
  */
 
 import { NextRequest } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { hashAudioBuffer } from "@/lib/audio-hash";
 import { DictationSegment } from "@/lib/dictation";
+import { buildSegments } from "@/lib/dictation-segmenter";
 import { prisma } from "@/lib/db";
-import { getGemini, GEMINI_MODEL } from "@/lib/gemini";
+import { transcribeWithWords } from "@/lib/groq";
 
 export const runtime = "nodejs";
 
 // Giới hạn bảo vệ chi phí
 const MAX_DURATION_SEC = 180; // 3 phút
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB (giữ buffer an toàn)
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB (Groq free tier cho tối đa 25MB)
 
 const ALLOWED_AUDIO_TYPES = new Set([
   "audio/mpeg",
@@ -41,21 +41,12 @@ const ALLOWED_AUDIO_TYPES = new Set([
   "audio/x-m4a",
   "audio/wav",
   "audio/wave",
+  "audio/x-wav",
   "audio/webm",
   "audio/ogg",
   "audio/flac",
   "video/webm", // webm thường bị báo sai mime type khi record trực tiếp
 ]);
-
-const TRANSCRIBE_PROMPT =
-  "Transcribe the English speech in this audio file and split it into individual sentences. " +
-  "For EACH sentence, give the exact start and end time (in seconds, decimal, 0 = start of file) " +
-  "matching when that sentence is actually spoken in the audio. " +
-  "Output ONLY valid JSON — no markdown code fences, no explanation — in exactly this shape: " +
-  '[{"text": "sentence text", "start": 0.0, "end": 3.2}, ...] ' +
-  "Rules: sentences must be in chronological order and cover all spoken content; " +
-  "each array item is exactly one sentence (do not merge multiple sentences into one item); " +
-  "do not add speaker labels or any commentary inside \"text\".";
 
 export async function POST(req: NextRequest) {
   const userId = await getCurrentUserId();
@@ -134,40 +125,29 @@ export async function POST(req: NextRequest) {
   if (cached?.segmentsJson) {
     segments = JSON.parse(cached.segmentsJson);
   } else {
-    // --- Gọi Gemini để transcribe + lấy timestamp từng câu ---
+    // --- Gọi Groq Whisper để transcribe + lấy timestamp từng TỪ ---
     try {
-      const gemini = getGemini();
-      const model = gemini.getGenerativeModel({ model: GEMINI_MODEL });
+      const result = await transcribeWithWords(
+        audioBuffer,
+        buildGroqFilename(audioFile.name, mimeType),
+        normalizeMime(mimeType)
+      );
 
-      // Encode audio thành base64 để gửi inline (phù hợp file nhỏ ≤ 20MB)
-      const base64Audio = audioBuffer.toString("base64");
-      const effectiveMime = normalizeMime(mimeType);
+      segments = buildSegments(result.words, result.segments, durationSec);
 
-      const parts = [
-        { inlineData: { mimeType: effectiveMime, data: base64Audio } },
-        { text: TRANSCRIBE_PROMPT },
-      ];
-
-      // Gemini thỉnh thoảng trả JSON không hợp lệ (thừa text, thiếu dấu…) —
-      // thử tối đa 2 lần trước khi báo lỗi cho user.
-      let parsed: DictationSegment[] | null = null;
-      let lastRawText = "";
-      for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
-        const result = await model.generateContent(parts);
-        lastRawText = result.response.text().trim();
-        parsed = parseSegments(lastRawText, durationSec);
-      }
-
-      if (!parsed || parsed.length === 0) {
-        console.error("[dictation/transcribe] Không parse được segments:", lastRawText);
+      if (segments.length === 0) {
+        console.error(
+          "[dictation/transcribe] Không dựng được segment nào. words=%d segments=%d",
+          result.words.length,
+          result.segments.length
+        );
         return Response.json(
           { error: "Không nhận ra giọng nói trong file. Hãy thử file khác." },
           { status: 422 }
         );
       }
 
-      segments = parsed;
-      const transcript = segments.map((s) => s.text).join(" ");
+      const transcript = result.text || segments.map((s) => s.text).join(" ");
 
       // Lưu cache
       await prisma.audioTranscript.upsert({
@@ -176,13 +156,35 @@ export async function POST(req: NextRequest) {
         update: { transcript, segmentsJson: JSON.stringify(segments), durationSec },
       });
     } catch (err) {
-      console.error("[dictation/transcribe] Gemini error:", err);
+      console.error("[dictation/transcribe] Groq error:", err);
       const message = err instanceof Error ? err.message : String(err);
-      // Trả lỗi Gemini rõ ràng hơn nếu có thể
-      if (message.includes("GEMINI_API_KEY") || message.includes("API key")) {
+
+      if (message.includes("GROQ_API_KEY")) {
         return Response.json(
-          { error: "Server chưa cấu hình GEMINI_API_KEY. Hãy kiểm tra .env.local." },
+          {
+            error:
+              "Server chưa cấu hình GROQ_API_KEY. Mở file .env và điền key " +
+              "(lấy miễn phí tại https://console.groq.com/keys).",
+          },
           { status: 500 }
+        );
+      }
+      if (message.startsWith("GROQ_AUTH")) {
+        return Response.json(
+          { error: "GROQ_API_KEY không hợp lệ. Hãy kiểm tra lại key trong .env." },
+          { status: 500 }
+        );
+      }
+      if (message.startsWith("GROQ_RATE_LIMIT")) {
+        return Response.json(
+          { error: "Groq đang quá tải hoặc đã hết quota. Hãy thử lại sau ít phút." },
+          { status: 429 }
+        );
+      }
+      if (message.startsWith("GROQ_TOO_LARGE")) {
+        return Response.json(
+          { error: "File quá lớn với dịch vụ nhận dạng. Hãy dùng file nhỏ hơn." },
+          { status: 400 }
         );
       }
       return Response.json(
@@ -196,41 +198,37 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * Parse + validate JSON segments từ output của Gemini.
- * Trả về null nếu output không phải JSON hợp lệ hoặc không còn segment nào
- * sau khi lọc dữ liệu hỏng (start/end vô lý, text rỗng…).
+ * Groq nhận diện định dạng audio qua ĐUÔI TÊN FILE chứ không chỉ qua
+ * Content-Type. Tên file gốc có thể thiếu đuôi hoặc có đuôi lạ (vd bản ghi từ
+ * MediaRecorder), nên luôn tự dựng lại tên với đuôi suy ra từ mimeType.
  */
-function parseSegments(raw: string, durationSec: number): DictationSegment[] | null {
-  // Gemini đôi khi bọc JSON trong ```json ... ``` dù đã dặn không làm vậy
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+function buildGroqFilename(originalName: string, mime: string): string {
+  const extByMime: Record<string, string> = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/m4a": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/wav": "wav",
+    "audio/wave": "wav",
+    "audio/x-wav": "wav",
+    "audio/webm": "webm",
+    "video/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/flac": "flac",
+  };
 
-  let data: unknown;
-  try {
-    data = JSON.parse(cleaned);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(data)) return null;
+  const ext =
+    extByMime[mime] ??
+    // Không đoán được từ mime → thử lấy đuôi của tên gốc, cuối cùng mặc định mp3.
+    (originalName.match(/\.([a-z0-9]{2,4})$/i)?.[1].toLowerCase() || "mp3");
 
-  const segments: DictationSegment[] = [];
-  for (const item of data) {
-    if (!item || typeof item !== "object") continue;
-    const obj = item as Record<string, unknown>;
-    const text = typeof obj.text === "string" ? obj.text.trim() : "";
-    const start = Number(obj.start);
-    const end = Number(obj.end);
-    if (!text) continue;
-    if (!isFinite(start) || !isFinite(end) || start < 0 || end <= start) continue;
-    segments.push({ text, start, end: Math.min(end, durationSec) });
-  }
-
-  segments.sort((a, b) => a.start - b.start);
-  return segments.length > 0 ? segments : null;
+  return `audio.${ext}`;
 }
 
 /**
- * Gemini SDK chỉ chấp nhận một số mimeType audio nhất định.
- * Map những giá trị không chuẩn về giá trị Gemini hiểu được.
+ * Map những mimeType không chuẩn về giá trị chuẩn trước khi gửi lên Groq.
+ * Groq hỗ trợ: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, webm.
  */
 function normalizeMime(mime: string): string {
   const map: Record<string, string> = {
@@ -238,6 +236,7 @@ function normalizeMime(mime: string): string {
     "audio/x-m4a": "audio/mp4",
     "audio/m4a": "audio/mp4",
     "audio/wave": "audio/wav",
+    "audio/x-wav": "audio/wav",
     "video/webm": "audio/webm",
   };
   return map[mime] ?? mime;
