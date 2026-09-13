@@ -763,8 +763,8 @@ export default function DictationPage() {
                 {" · "}
                 <span className="text-accent-text font-medium">* = ký tự sai/thiếu</span>
               </p>
-              {/* Bản gốc — chỉ hiện sau lần thứ 2 trở đi để khuyến khích nghe trước */}
-              {state.attempts >= 2 && (
+              {/* Bản gốc — chỉ hiện khi đã gõ đúng, không lộ đáp án lúc còn sai */}
+              {allCorrect && (
                 <div className="mt-3 rounded-lg bg-bg p-3">
                   <p className="text-xs text-muted mb-1">Bản gốc:</p>
                   <p className="text-sm font-mono">{segments[currentIndex].text}</p>
