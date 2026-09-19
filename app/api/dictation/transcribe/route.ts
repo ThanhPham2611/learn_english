@@ -26,6 +26,7 @@ import { DictationSegment } from "@/lib/dictation";
 import { buildSegments } from "@/lib/dictation-segmenter";
 import { prisma } from "@/lib/db";
 import { transcribeWithWords } from "@/lib/groq";
+import type { GroqSegment, GroqWord } from "@/lib/groq";
 
 export const runtime = "nodejs";
 
@@ -122,7 +123,13 @@ export async function POST(req: NextRequest) {
   }
 
   let segments: DictationSegment[];
-  if (cached?.segmentsJson) {
+  if (cached?.wordsJson) {
+    // Dựng lại biên từ output thô ở MỖI lần đọc — xem comment wordsJson trong
+    // schema.prisma. Không tốn gọi API, không cần version cache.
+    const raw = JSON.parse(cached.wordsJson) as { words: GroqWord[]; segments: GroqSegment[] };
+    segments = buildSegments(raw.words, raw.segments, durationSec);
+  } else if (cached?.segmentsJson) {
+    // Cache đời cũ (lưu trước khi có wordsJson): chỉ còn biên đã chốt, dùng tạm.
     segments = JSON.parse(cached.segmentsJson);
   } else {
     // --- Gọi Groq Whisper để transcribe + lấy timestamp từng TỪ ---
@@ -135,25 +142,21 @@ export async function POST(req: NextRequest) {
 
       segments = buildSegments(result.words, result.segments, durationSec);
 
-      if (segments.length === 0) {
-        console.error(
-          "[dictation/transcribe] Không dựng được segment nào. words=%d segments=%d",
-          result.words.length,
-          result.segments.length
-        );
-        return Response.json(
-          { error: "Không nhận ra giọng nói trong file. Hãy thử file khác." },
-          { status: 422 }
-        );
-      }
-
       const transcript = result.text || segments.map((s) => s.text).join(" ");
+      const wordsJson = JSON.stringify({ words: result.words, segments: result.segments });
 
       // Lưu cache
       await prisma.audioTranscript.upsert({
         where: { userId_fileHash: { userId, fileHash } },
-        create: { userId, fileHash, transcript, segmentsJson: JSON.stringify(segments), durationSec },
-        update: { transcript, segmentsJson: JSON.stringify(segments), durationSec },
+        create: {
+          userId,
+          fileHash,
+          transcript,
+          segmentsJson: JSON.stringify(segments),
+          wordsJson,
+          durationSec,
+        },
+        update: { transcript, segmentsJson: JSON.stringify(segments), wordsJson, durationSec },
       });
     } catch (err) {
       console.error("[dictation/transcribe] Groq error:", err);
@@ -192,6 +195,16 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       );
     }
+  }
+
+  // Kiểm tra sau khối if/else để nhánh dựng-lại-từ-cache cũng được canh, không
+  // trả 200 kèm mảng rỗng.
+  if (segments.length === 0) {
+    console.error("[dictation/transcribe] Không dựng được segment nào cho fileHash=%s", fileHash);
+    return Response.json(
+      { error: "Không nhận ra giọng nói trong file. Hãy thử file khác." },
+      { status: 422 }
+    );
   }
 
   return Response.json({ segments });
