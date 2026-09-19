@@ -178,6 +178,12 @@ model AudioTranscript {
   // đúng đoạn audio gốc theo từng câu (thay vì đọc lại bằng TTS). Null = cache
   // cũ tạo trước khi có tính năng này — coi như cache miss, transcribe lại.
   segmentsJson String?
+  // JSON: { words: [{word,start,end}], segments: [...] } — ĐẦU RA THÔ của
+  // Whisper. Cache thứ ĐẮT (1 lần gọi Groq), không cache thứ RẺ (hàm thuần
+  // buildSegments): mỗi request đều dựng lại segment từ words, nên mọi lần sửa
+  // thuật toán chốt biên áp dụng ngay cho file cũ mà không tốn thêm tiền API và
+  // không có bước nào để quên. Null = cache đời cũ, khi đó đọc tạm segmentsJson.
+  wordsJson    String?
   durationSec Float    // độ dài audio tính bằng giây (user báo lên, best-effort)
   createdAt   DateTime @default(now())
 

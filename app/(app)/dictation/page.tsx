@@ -451,25 +451,6 @@ export default function DictationPage() {
     if (allCorrect) return;
   }
 
-  /** Thử lại đoạn hiện tại — giữ nguyên text, chỉ unlock textarea để sửa tiếp */
-  function handleRetry() {
-    setPracticeStates((prev) =>
-      prev.map((s, i) =>
-        i === currentIndex
-          ? { ...s, submitted: false, wordResults: s.wordResults }
-          : s
-      )
-    );
-    // Focus lại textarea, đặt cursor về cuối
-    setTimeout(() => {
-      const ta = textareaRef.current;
-      if (ta) {
-        ta.focus();
-        ta.setSelectionRange(ta.value.length, ta.value.length);
-      }
-    }, 0);
-  }
-
   /** Nhảy tới câu bất kỳ (từ danh sách số) — tự phát luôn đoạn audio của câu đó */
   function handleJumpTo(idx: number) {
     setCurrentIndex(idx);
@@ -785,7 +766,7 @@ export default function DictationPage() {
             onChange={(e) =>
               setPracticeStates((prev) =>
                 prev.map((s, i) =>
-                  i === currentIndex && !s.submitted
+                  i === currentIndex && !(s.submitted && allCorrect)
                     ? { ...s, typedText: e.target.value }
                     : s
                 )
@@ -794,12 +775,11 @@ export default function DictationPage() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (canCheck) handleCheckChunk();
-                else if (state.submitted && !allCorrect) handleRetry();
-                else if (state.submitted) handleNextChunk();
+                if (state.submitted && allCorrect) handleNextChunk();
+                else if (state.typedText.trim()) handleCheckChunk();
               }
             }}
-            disabled={state.submitted}
+            disabled={state.submitted && allCorrect}
             placeholder="Gõ câu bạn nghe được ở đây…"
             rows={3}
             className="w-full rounded-xl border border-border bg-bg p-3 text-sm font-mono resize-none outline-none focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60 disabled:bg-surface"
@@ -827,10 +807,11 @@ export default function DictationPage() {
               /* Còn sai → Thử lại + Bỏ qua */
               <>
                 <button
-                  onClick={handleRetry}
-                  className="flex-1 cursor-pointer rounded-xl bg-primary px-5 py-2.5 font-medium text-sm text-white transition-colors duration-200 hover:bg-primary-dark"
+                  onClick={handleCheckChunk}
+                  disabled={!state.typedText.trim()}
+                  className="flex-1 cursor-pointer rounded-xl bg-primary px-5 py-2.5 font-medium text-sm text-white transition-colors duration-200 hover:bg-primary-dark disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Thử lại
+                  Kiểm tra lại
                 </button>
                 <button
                   onClick={handleNextChunk}
@@ -854,7 +835,7 @@ export default function DictationPage() {
               ? <>Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để kiểm tra. Không cần gõ đúng hoa thường.</>
               : allCorrect
                 ? <>Tuyệt vời! Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để sang câu tiếp.</>
-                : <>Nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để thử lại, hoặc &quot;Bỏ qua&quot; để sang câu tiếp.</>
+                : <>Gõ tiếp rồi nhấn <kbd className="rounded bg-border px-1">Enter</kbd> để kiểm tra lại, hoặc &quot;Bỏ qua&quot; để sang câu tiếp.</>
             }
           </p>
         </div>

@@ -13,8 +13,8 @@
  * từ → câu theo dấu câu + khoảng lặng.
  */
 
-import { DictationSegment } from "./dictation";
-import { GroqSegment, GroqWord } from "./groq";
+import type { DictationSegment } from "./dictation";
+import type { GroqSegment, GroqWord } from "./groq";
 
 // --- Ngưỡng chia câu ---------------------------------------------------------
 
@@ -26,8 +26,19 @@ const MIN_WORDS = 3;
 const MAX_WORDS = 16;
 /** Câu dài hơn mức này (giây) → tách tiếp. */
 const MAX_SEG_SEC = 12;
-/** Không gộp câu ngắn qua khoảng lặng dài hơn mức này. */
-const MERGE_GAP_SEC = 1.2;
+/**
+ * Câu quá dài chỉ được tách ở chỗ CÓ NGẮT HƠI THẬT. Tách ở khoảng hở ~0 nghĩa là
+ * cắt giữa cụm từ đang nói liền — vừa khó gõ, vừa tạo ra đúng cái biên hở ≈ 0
+ * gây lố sang câu sau. Thà để một câu dài còn hơn cắt vào giữa hơi.
+ */
+const MIN_SPLIT_GAP_SEC = 0.2;
+/**
+ * Không gộp câu ngắn qua khoảng lặng dài hơn mức này. Buộc bằng MAX_GAP_SEC:
+ * khoảng lặng đã đủ mạnh để ÉP TÁCH câu thì không có lý gì lát sau lại gộp
+ * ngược về. (Trước đây là 1.2s > MAX_GAP_SEC nên tự mâu thuẫn: tách ra ở 0.8s
+ * rồi gộp lại cũng ở 0.8s.)
+ */
+const MERGE_GAP_SEC = MAX_GAP_SEC;
 
 // --- Cứu vãn khi Whisper quên chấm câu ---------------------------------------
 // Whisper thỉnh thoảng ngừng sinh dấu câu giữa chừng (thường ở nửa sau file dài).
@@ -51,34 +62,12 @@ const END_GUARD_SEC = 0.15;
 const START_LEAD_SEC = 0.15;
 /** Ngân thêm đuôi câu khi khoảng lặng phía sau đủ rộng. */
 const END_TAIL_PAD_SEC = 0.1;
-/** Không cắt cụt đầu/đuôi câu quá mức này để né biên. */
-const MAX_TRIM_SEC = 0.25;
-/** Chặn cứng: dù thế nào cũng không lấn vào onset câu sau quá gần mức này. */
-const HARD_GUARD_SEC = 0.05;
 
 // --- Lọc hallucination -------------------------------------------------------
 
 /** Đoạn im lặng/nhạc nền thường bị Whisper "bịa" ra chữ với 2 chỉ số này. */
 const NO_SPEECH_THRESHOLD = 0.6;
 const AVG_LOGPROB_THRESHOLD = -0.8;
-
-/**
- * Những câu Whisper hay bịa ra trên nền im lặng (do học từ phụ đề YouTube).
- * Chỉ loại khi câu quá ngắn và không gộp được vào đâu — xem mergeShort().
- */
-const HALLUCINATION_DENYLIST = new Set([
-  "you",
-  "thank you",
-  "thank you.",
-  "thanks for watching",
-  "thanks for watching!",
-  "bye",
-  "bye.",
-  "um",
-  "uh",
-  "mm",
-  ".",
-]);
 
 /** Viết tắt kết thúc bằng dấu chấm nhưng KHÔNG phải hết câu. */
 const ABBREVIATIONS = new Set([
@@ -210,6 +199,10 @@ function startsNewSentence(nextRaw: string, gap: number): boolean {
 /**
  * Tách đệ quy tại khoảng trống giữa 2 từ LỚN NHẤT nằm ở vùng giữa câu (bỏ qua
  * 25% đầu và cuối) để không tách ra những mẩu vụn 1-2 từ.
+ *
+ * Nhưng chỉ tách khi chỗ đó có NGẮT HƠI THẬT (≥ MIN_SPLIT_GAP_SEC). Câu dài nói
+ * một hơi không có chỗ nào để tách tử tế: ép tách sẽ cắt vào giữa cụm từ. Với
+ * audio đã tự chia câu sẵn thì đây còn là thứ giữ đúng ánh xạ 1 câu = 1 đoạn.
  */
 function splitLongGroup(group: WordGroup): WordGroup[] {
   const durationOf = (g: WordGroup) => g[g.length - 1].end - g[0].start;
@@ -229,7 +222,7 @@ function splitLongGroup(group: WordGroup): WordGroup[] {
     }
   }
 
-  if (bestIndex <= 0) return [group];
+  if (bestIndex <= 0 || bestGap < MIN_SPLIT_GAP_SEC) return [group];
 
   return [
     ...splitLongGroup(group.slice(0, bestIndex)),
@@ -271,17 +264,16 @@ function mergeShortGroups(groups: WordGroup[]): WordGroup[] {
       continue;
     }
 
-    // Đứng một mình, cách xa hai bên → chỉ giữ nếu không phải rác.
-    if (isLikelyHallucination(group)) continue;
+    // Đứng một mình, cách xa hai bên → GIỮ. Trước đây chỗ này còn đối chiếu một
+    // denylist ("thank you", "you", "bye"…) và BỎ HẲN nếu trùng. Đã gỡ: nó xoá
+    // câu mà không báo gì, nên một câu ngắn CÓ THẬT ("Thank you.") sẽ biến mất
+    // khỏi bài và user không tài nào biết. Với bài chính tả, mất câu thật tệ hơn
+    // nhiều so với thừa một câu rác — câu rác thì bấm "Bỏ qua" là xong.
+    // Lưới lọc chính (no_speech_prob + avg_logprob) vẫn còn ở dropHallucinatedWords().
     result.push(group);
   }
 
   return result;
-}
-
-function isLikelyHallucination(group: WordGroup): boolean {
-  const text = groupText(group).toLowerCase().trim();
-  return HALLUCINATION_DENYLIST.has(text);
 }
 
 // --- Bước 5: chốt biên -------------------------------------------------------
@@ -291,41 +283,51 @@ function isLikelyHallucination(group: WordGroup): boolean {
  *
  * Đây là bài luyện nghe-viết, nên hai loại lỗi biên KHÔNG ngang nhau:
  *  - Phát lố sang từ đầu của câu SAU = lộ đáp án → lỗi nặng.
- *  - Cắt cụt vài chục ms đuôi câu (phần âm đang tắt dần) → gần như vô hại.
- * Vì vậy: đầu câu thì vào SỚM cho rộng rãi, cuối câu thì dừng DỨT KHOÁT trước
- * onset của câu kế tiếp — và ưu tiên cắt cụt hơn là lấn sang.
+ *  - Cắt cụt đuôi câu = mất âm tiết cuối (chỗ mang -ly/-ed/-s, thứ bài chính
+ *    tả CHẤM ĐIỂM) → gõ kiểu gì cũng sai.
+ *
+ * BẤT BIẾN CỨNG: cửa sổ phát luôn CHỨA ĐỦ từ của chính câu mình. Pad và guard
+ * chỉ được ăn vào KHOẢNG HỞ, không bao giờ cắn vào một từ. Lý do: script chấm
+ * điểm (segments[i].text) là cố định, nên thứ user NGHE phải khớp đúng thứ
+ * script NÓI — thiếu một âm tiết là hỏng hợp đồng đó.
+ *
+ * Hệ quả khi khoảng hở < END_GUARD_SEC: dừng ở đúng cuối từ mình, chấp nhận
+ * lố qua onset THẬT của câu sau chừng vài chục ms. Vài chục ms đó chỉ là tiếng
+ * bật đầu của một phụ âm — không đủ nhận ra là từ gì, nên không lộ đáp án.
  */
 function finalizeBoundaries(groups: WordGroup[], durationSec: number): DictationSegment[] {
-  const clamp = (v: number) => Math.max(0, Math.min(v, durationSec));
+  // durationSec do client báo lên (best-effort, với MP3 VBR có thể là số ước
+  // lượng) — không để nó cắt mất đuôi câu. Lấy max trên MỌI nhóm chứ không chỉ
+  // nhóm cuối: mốc của Whisper không phải lúc nào cũng tăng đều, và bất biến
+  // "chứa đủ từ" phải đúng vô điều kiện.
+  const maxWordEnd = groups.reduce((m, g) => Math.max(m, g[g.length - 1].end), 0);
+  const limit = Math.max(durationSec, maxWordEnd);
+  const clamp = (v: number) => Math.max(0, Math.min(v, limit));
 
   return groups.map((group, i) => {
     const firstStart = group[0].start;
     const lastEnd = group[group.length - 1].end;
-    const prev = groups[i - 1];
     const next = groups[i + 1];
 
     // --- START: luôn vào sớm hơn onset để bù việc Whisper báo onset trễ ---
+    // KHÔNG chặn theo đuôi câu trước: chặn như vậy chỉ kích hoạt đúng lúc mốc
+    // Whisper chồng lấn, và khi đó nó cắt mất phụ âm đầu của chính câu này —
+    // nghe lố lại đuôi câu ĐÃ GÕ RỒI thì vô hại, vào trễ thì mất hẳn thông tin.
     let start = firstStart - START_LEAD_SEC;
-    if (prev) {
-      // ...nhưng đừng lùi quá sâu vào đuôi câu trước.
-      start = Math.max(start, prev[prev.length - 1].end - MAX_TRIM_SEC);
-    }
 
-    // --- END: dừng trước onset câu sau ---
+    // --- END: né onset câu sau, nhưng chỉ bằng phần KHOẢNG HỞ ---
+    // max(lastEnd, ...) là cái chốt: khi hở hẹp (hoặc khi mốc Whisper tự mâu
+    // thuẫn, onset câu sau báo SỚM hơn cuối từ của câu này), guard bị bỏ qua
+    // thay vì cắn vào từ cuối của mình.
     let end = lastEnd + END_TAIL_PAD_SEC;
     if (next) {
-      const nextStart = next[0].start;
-      end = Math.min(end, nextStart - END_GUARD_SEC);
-      // Đừng cắt cụt quá tay chỉ để né biên...
-      end = Math.max(end, lastEnd - MAX_TRIM_SEC);
-      // ...nhưng chặn cứng: mốc từ của Whisper có thể chồng lấn nhau, khi đó
-      // vẫn TUYỆT ĐỐI không được lấn sang onset câu sau.
-      end = Math.min(end, nextStart - HARD_GUARD_SEC);
+      end = Math.max(lastEnd, Math.min(end, next[0].start - END_GUARD_SEC));
     }
 
     start = clamp(start);
     end = clamp(end);
-    // Trường hợp suy biến (mốc Whisper chồng lấn nặng): giữ 1 khoảng nghe được.
+    // Suy biến duy nhất còn lại: câu chỉ gồm từ dài 0s ở đúng mốc 0 → cửa sổ
+    // rỗng, không phát được gì. Giữ lấy một khoảng nghe được.
     if (end <= start) end = clamp(start + 0.2);
 
     return { text: groupText(group), start, end };
